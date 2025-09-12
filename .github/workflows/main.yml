@@ -275,9 +275,14 @@ jobs:
           Write-Host "4. Connect and enjoy!"
           Write-Host ""
           Write-Host "🖥️  RDP Access (for server management):"
-          Write-Host "   Install Tailscale and connect to: $env:TAILSCALE_IP"
-          Write-Host "   Username: Admin"
-          Write-Host "   Password: $env:ADMIN_PASSWORD"
+          if ($env:TAILSCALE_ENABLED -eq "true") {
+              Write-Host "   Install Tailscale and connect to: $env:TAILSCALE_IP"
+              Write-Host "   Username: Admin"
+              Write-Host "   Password: $env:ADMIN_PASSWORD"
+          } else {
+              Write-Host "   ⚠️ RDP not available (Tailscale not configured)"
+              Write-Host "   To enable RDP: Add TAILSCALE_AUTH_KEY to repository secrets"
+          }
           Write-Host ""
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
