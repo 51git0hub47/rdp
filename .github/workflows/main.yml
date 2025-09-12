@@ -76,28 +76,7 @@ jobs:
           # Accept EULA
           Set-Content -Path "$serverDir\eula.txt" -Value "eula=true"
           
-          # Configure server
-          $config = @'
-server-name=GitHub Public Server
-gamemode=survival
-force-gamemode=false
-difficulty=easy
-allow-cheats=false
-max-players=20
-online-mode=false
-allow-list=false
-server-port=19132
-server-portv6=19133
-view-distance=32
-tick-distance=4
-player-idle-timeout=30
-max-threads=8
-level-name=Bedrock level
-default-player-permission-level=member
-texturepack-required=false
-'@
-          Set-Content -Path "$serverDir\server.properties" -Value $config
-          Write-Host "✅ Minecraft server configured"
+          Write-Host "✅ Minecraft server downloaded and EULA accepted"
 
       - name: Setup Backup System
         run: |
@@ -274,10 +253,9 @@ texturepack-required=false
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
           Write-Host "🌍 PUBLIC SERVER ADDRESS: $env:PUBLIC_URL"
-          Write-Host "🎯 Game Mode: Survival"
-          Write-Host "⚔️  Difficulty: Easy"
-          Write-Host "👥 Max Players: 20"
-          Write-Host "🔓 Authentication: OFF (cracked players can join)"
+          Write-Host "🎯 Game Mode: Default (from server defaults)"
+          Write-Host "👥 Max Players: Default (from server defaults)"
+          Write-Host "🔓 Authentication: Default (from server defaults)"
           if ($env:WORLD_RESTORED -eq "true") {
               Write-Host "🔄 World Status: RESTORED from previous session"
           } else {
