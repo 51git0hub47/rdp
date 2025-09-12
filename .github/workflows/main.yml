@@ -272,7 +272,7 @@ jobs:
           Write-Host "⏳ Waiting for world generation (60 seconds)..."
           Start-Sleep -Seconds 60
           
-          # Create initial backup
+          # Create initial backup using improved method
           $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
           $backupName = "initial_backup_$timestamp"
           $backupPath = "C:\WorldBackups\$backupName.zip"
@@ -283,10 +283,24 @@ jobs:
           $worldPath = "C:\MinecraftServer\worlds"
           if (Test-Path $worldPath) {
               try {
-                  Compress-Archive -Path "$worldPath\*" -DestinationPath $backupPath -Force
+                  # Use robocopy for better file handling
+                  $tempBackupDir = "$env:TEMP\minecraft_initial_$timestamp"
+                  New-Item -Path $tempBackupDir -ItemType Directory -Force
+                  
+                  $robocopyResult = & robocopy "$worldPath" "$tempBackupDir" /E /R:0 /W:0 /NP /NDL /NFL
+                  Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $backupPath -Force
+                  Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+                  
                   Write-Host "✅ Initial backup created: $backupName"
               } catch {
                   Write-Host "⚠️ Initial backup failed: $($_.Exception.Message)"
+                  # Try fallback method
+                  try {
+                      Compress-Archive -Path "$worldPath\*" -DestinationPath $backupPath -Force -ErrorAction Continue
+                      Write-Host "⚠️ Initial backup completed with warnings"
+                  } catch {
+                      Write-Host "❌ Initial backup completely failed"
+                  }
               }
           } else {
               Write-Host "⚠️ No world data found yet for initial backup"
