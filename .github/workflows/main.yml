@@ -25,7 +25,6 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           Restart-Service -Name TermService -Force
-
           # Create admin user
           $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | % {[char]$_})
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
@@ -35,7 +34,6 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Admin"
           
           echo "ADMIN_PASSWORD=$password" >> $env:GITHUB_ENV
-
       - name: Install Tailscale (for RDP access)
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -43,7 +41,6 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
-
       - name: Connect to Tailscale
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=mc-public-$env:GITHUB_RUN_ID
@@ -57,18 +54,18 @@ jobs:
               $retries++
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
       - name: Download and Setup Minecraft Server
         run: |
           # Create server directory
           $serverDir = "C:\MinecraftServer"
           New-Item -Path $serverDir -ItemType Directory -Force
           
-          # Try multiple Minecraft server download URLs
+          # Updated Minecraft server download URLs (NEW FORMAT)
           $mcUrls = @(
-              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.31.04.zip",
-              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.30.03.zip",
-              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.23.01.zip"
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.95.1.zip",
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.93.4.zip",
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.92.3.zip",
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.90.2.zip"
           )
           
           $zipPath = "$serverDir\bedrock-server.zip"
@@ -112,7 +109,7 @@ jobs:
               Write-Error "❌ Failed to download Minecraft server from all sources"
               Write-Host "🔍 Network connectivity test:"
               try {
-                  Test-NetConnection -ComputerName "minecraft.azureedge.net" -Port 443
+                  Test-NetConnection -ComputerName "minecraft.net" -Port 443
                   Test-NetConnection -ComputerName "8.8.8.8" -Port 443
               } catch {
                   Write-Host "Network test failed: $($_.Exception.Message)"
@@ -133,13 +130,11 @@ jobs:
           Set-Content -Path "$serverDir\eula.txt" -Value "eula=true"
           
           Write-Host "✅ Minecraft server downloaded, extracted, and EULA accepted"
-
       - name: Setup Backup System
         run: |
           # Create backup directory
           New-Item -Path "C:\WorldBackups" -ItemType Directory -Force
           Write-Host "✅ Backup system initialized"
-
       - name: Restore Previous World (if requested)
         run: |
           if ("${{ github.event.inputs.restore_world }}" -eq "true") {
@@ -209,7 +204,6 @@ jobs:
               Write-Host "🆕 Starting with fresh world (restore not requested)"
               echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
           }
-
       - name: Install and Setup ngrok
         run: |
           # Download ngrok
@@ -226,7 +220,6 @@ jobs:
           [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
           
           Write-Host "✅ ngrok installed"
-
       - name: Start Minecraft Server
         run: |
           $serverDir = "C:\MinecraftServer"
@@ -251,7 +244,6 @@ jobs:
               Write-Error "Failed to start Minecraft server"
               exit 1
           }
-
       - name: Expose Server with ngrok
         run: |
           Write-Host "Starting ngrok tunnel..."
@@ -274,7 +266,6 @@ jobs:
               Write-Warning "Could not get ngrok URL from API, will try manual check"
               echo "PUBLIC_URL=Check ngrok dashboard" >> $env:GITHUB_ENV
           }
-
       - name: Initial World Backup
         run: |
           # Wait for world to be properly generated
@@ -300,7 +291,6 @@ jobs:
           } else {
               Write-Host "⚠️ No world data found yet for initial backup"
           }
-
       - name: Display Server Information
         run: |
           Write-Host ""
@@ -342,7 +332,6 @@ jobs:
           Write-Host ""
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
-
       - name: Monitor Server with Auto-Backup
         run: |
           $startTime = Get-Date
@@ -446,7 +435,6 @@ jobs:
                   Stop-Process -Id $env:NGROK_PID -Force -ErrorAction SilentlyContinue
               } catch {}
           }
-
       - name: Upload World Backups as Artifacts
         if: always()
         uses: actions/upload-artifact@v4
