@@ -34,6 +34,7 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Admin"
           
           echo "ADMIN_PASSWORD=$password" >> $env:GITHUB_ENV
+
       - name: Install Tailscale (for RDP access)
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
@@ -41,6 +42,7 @@ jobs:
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+
       - name: Connect to Tailscale
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=mc-public-$env:GITHUB_RUN_ID
@@ -54,13 +56,14 @@ jobs:
               $retries++
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
       - name: Download and Setup Minecraft Server
         run: |
           # Create server directory
           $serverDir = "C:\MinecraftServer"
           New-Item -Path $serverDir -ItemType Directory -Force
           
-          # Updated Minecraft server download URLs (NEW FORMAT)
+          # Updated Minecraft server download URLs
           $mcUrls = @(
               "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.95.1.zip",
               "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.93.4.zip",
@@ -130,11 +133,13 @@ jobs:
           Set-Content -Path "$serverDir\eula.txt" -Value "eula=true"
           
           Write-Host "✅ Minecraft server downloaded, extracted, and EULA accepted"
+
       - name: Setup Backup System
         run: |
           # Create backup directory
           New-Item -Path "C:\WorldBackups" -ItemType Directory -Force
           Write-Host "✅ Backup system initialized"
+
       - name: Restore Previous World (if requested)
         run: |
           if ("${{ github.event.inputs.restore_world }}" -eq "true") {
@@ -204,6 +209,7 @@ jobs:
               Write-Host "🆕 Starting with fresh world (restore not requested)"
               echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
           }
+
       - name: Install and Setup ngrok
         run: |
           # Download ngrok
@@ -220,6 +226,7 @@ jobs:
           [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
           
           Write-Host "✅ ngrok installed"
+
       - name: Start Minecraft Server
         run: |
           $serverDir = "C:\MinecraftServer"
@@ -235,8 +242,9 @@ jobs:
           $serverProcess = Start-Process -FilePath "$serverDir\bedrock_server.exe" -WorkingDirectory $serverDir -PassThru -WindowStyle Hidden
           echo "SERVER_PID=$($serverProcess.Id)" >> $env:GITHUB_ENV
           
-          # Wait for server to fully start
-          Start-Sleep -Seconds 15
+          # Wait for server to fully start and generate world
+          Write-Host "⏳ Waiting for server startup and world generation..."
+          Start-Sleep -Seconds 30
           
           if (Get-Process -Id $serverProcess.Id -ErrorAction SilentlyContinue) {
               Write-Host "✅ Minecraft server started!"
@@ -244,6 +252,7 @@ jobs:
               Write-Error "Failed to start Minecraft server"
               exit 1
           }
+
       - name: Expose Server with ngrok
         run: |
           Write-Host "Starting ngrok tunnel..."
@@ -253,24 +262,52 @@ jobs:
           echo "NGROK_PID=$($ngrokProcess.Id)" >> $env:GITHUB_ENV
           
           # Wait for ngrok to start
-          Start-Sleep -Seconds 10
+          Write-Host "⏳ Waiting for ngrok to establish tunnel..."
+          Start-Sleep -Seconds 15
           
-          # Get the public URL from ngrok API
-          try {
-              $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
-              $publicUrl = $ngrokInfo.tunnels[0].public_url
-              $publicUrl = $publicUrl -replace "udp://", ""
-              echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
-              Write-Host "✅ ngrok tunnel established: $publicUrl"
-          } catch {
-              Write-Warning "Could not get ngrok URL from API, will try manual check"
-              echo "PUBLIC_URL=Check ngrok dashboard" >> $env:GITHUB_ENV
+          # Get the public URL from ngrok API with retries
+          $publicUrl = $null
+          $retries = 0
+          
+          while (-not $publicUrl -and $retries -lt 10) {
+              try {
+                  Write-Host "🔍 Attempt $($retries + 1): Checking ngrok API..."
+                  $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 10
+                  
+                  if ($ngrokInfo.tunnels -and $ngrokInfo.tunnels.Count -gt 0) {
+                      $publicUrl = $ngrokInfo.tunnels[0].public_url
+                      $publicUrl = $publicUrl -replace "udp://", ""
+                      echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
+                      Write-Host "✅ ngrok tunnel established: $publicUrl"
+                      break
+                  } else {
+                      Write-Host "⚠️ No tunnels found in API response"
+                  }
+              } catch {
+                  Write-Host "⚠️ API check failed: $($_.Exception.Message)"
+              }
+              
+              $retries++
+              if ($retries -lt 10) {
+                  Write-Host "⏳ Waiting 5 seconds before retry..."
+                  Start-Sleep -Seconds 5
+              }
           }
+          
+          if (-not $publicUrl) {
+              Write-Host "❌ Could not get ngrok URL after 10 attempts"
+              Write-Host "🔧 Manual check required - ngrok process may still be working"
+              echo "PUBLIC_URL=Check ngrok dashboard at http://localhost:4040" >> $env:GITHUB_ENV
+              
+              # Don't fail the workflow, continue with monitoring
+              Write-Host "⚠️ Continuing with server monitoring despite ngrok URL issue"
+          }
+
       - name: Initial World Backup
         run: |
-          # Wait for world to be properly generated
-          Write-Host "⏳ Waiting for world generation (60 seconds)..."
-          Start-Sleep -Seconds 60
+          # Wait longer for world to be properly generated
+          Write-Host "⏳ Waiting for world generation and stabilization (2 minutes)..."
+          Start-Sleep -Seconds 120
           
           # Create initial backup using improved method
           $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
@@ -279,32 +316,58 @@ jobs:
           
           Write-Host "💾 Creating initial world backup..."
           
-          # Backup world files (server keeps running)
-          $worldPath = "C:\MinecraftServer\worlds"
-          if (Test-Path $worldPath) {
+          # Check multiple possible world locations
+          $possibleWorldPaths = @(
+              "C:\MinecraftServer\worlds",
+              "C:\MinecraftServer\world",
+              "C:\MinecraftServer\Bedrock level"
+          )
+          
+          $worldPath = $null
+          foreach ($path in $possibleWorldPaths) {
+              if (Test-Path $path) {
+                  $worldPath = $path
+                  Write-Host "📁 Found world data at: $worldPath"
+                  break
+              }
+          }
+          
+          if ($worldPath -and (Get-ChildItem $worldPath -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
               try {
-                  # Use robocopy for better file handling
+                  # Use robocopy for better file handling with retry
                   $tempBackupDir = "$env:TEMP\minecraft_initial_$timestamp"
                   New-Item -Path $tempBackupDir -ItemType Directory -Force
                   
-                  $robocopyResult = & robocopy "$worldPath" "$tempBackupDir" /E /R:0 /W:0 /NP /NDL /NFL
-                  Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $backupPath -Force
-                  Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+                  # Copy files with retry logic
+                  $copySuccess = $false
+                  for ($i = 1; $i -le 3; $i++) {
+                      try {
+                          Write-Host "📂 Copy attempt $i of 3..."
+                          robocopy "$worldPath" "$tempBackupDir" /E /R:2 /W:1 /NP
+                          $copySuccess = $true
+                          break
+                      } catch {
+                          Write-Host "⚠️ Copy attempt $i failed: $($_.Exception.Message)"
+                          Start-Sleep -Seconds 5
+                      }
+                  }
                   
-                  Write-Host "✅ Initial backup created: $backupName"
+                  if ($copySuccess -and (Get-ChildItem $tempBackupDir -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
+                      Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $backupPath -Force
+                      Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+                      Write-Host "✅ Initial backup created successfully: $backupName"
+                  } else {
+                      Write-Host "⚠️ No files copied, skipping initial backup"
+                  }
               } catch {
                   Write-Host "⚠️ Initial backup failed: $($_.Exception.Message)"
-                  # Try fallback method
-                  try {
-                      Compress-Archive -Path "$worldPath\*" -DestinationPath $backupPath -Force -ErrorAction Continue
-                      Write-Host "⚠️ Initial backup completed with warnings"
-                  } catch {
-                      Write-Host "❌ Initial backup completely failed"
-                  }
+                  # Don't fail the entire workflow for backup issues
+                  Write-Host "🔄 Server will continue running without initial backup"
               }
           } else {
-              Write-Host "⚠️ No world data found yet for initial backup"
+              Write-Host "⚠️ No world data found yet, will backup on first scheduled interval"
           }
+
       - name: Display Server Information
         run: |
           Write-Host ""
@@ -312,7 +375,14 @@ jobs:
           Write-Host "                🎮 PUBLIC MINECRAFT SERVER WITH BACKUPS 🎮          "
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
-          Write-Host "🌍 PUBLIC SERVER ADDRESS: $env:PUBLIC_URL"
+          
+          if ($env:PUBLIC_URL -and $env:PUBLIC_URL -ne "Check ngrok dashboard at http://localhost:4040") {
+              Write-Host "🌍 PUBLIC SERVER ADDRESS: $env:PUBLIC_URL"
+          } else {
+              Write-Host "🌍 PUBLIC SERVER ADDRESS: Check http://localhost:4040 for ngrok URL"
+              Write-Host "   (ngrok is running but API didn't respond - check manually)"
+          }
+          
           Write-Host "🎯 Game Mode: Default (from server defaults)"
           Write-Host "👥 Max Players: Default (from server defaults)"
           Write-Host "🔓 Authentication: Default (from server defaults)"
@@ -323,7 +393,7 @@ jobs:
           }
           Write-Host ""
           Write-Host "💾 BACKUP SCHEDULE:"
-          Write-Host "   • Initial: 60 seconds after start"
+          Write-Host "   • Initial: After world generation"
           Write-Host "   • Periodic: Every 30 minutes"
           Write-Host "   • Final: When server stops"
           Write-Host "   • Emergency: If unexpected shutdown"
@@ -335,7 +405,7 @@ jobs:
           Write-Host "4. Connect and enjoy!"
           Write-Host ""
           Write-Host "🖥️  RDP Access (for server management):"
-          if ($env:TAILSCALE_ENABLED -eq "true") {
+          if ($env:TAILSCALE_IP) {
               Write-Host "   Install Tailscale and connect to: $env:TAILSCALE_IP"
               Write-Host "   Username: Admin"
               Write-Host "   Password: $env:ADMIN_PASSWORD"
@@ -344,17 +414,24 @@ jobs:
               Write-Host "   To enable RDP: Add TAILSCALE_AUTH_KEY to repository secrets"
           }
           Write-Host ""
+          Write-Host "🔧 Manual ngrok check: http://localhost:4040"
+          Write-Host ""
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
+
       - name: Monitor Server with Auto-Backup
         run: |
           $startTime = Get-Date
           $lastBackup = Get-Date
           $counter = 0
-          $backupCounter = 1  # We already did initial backup
+          $backupCounter = 1  # We attempted initial backup
           
           Write-Host "🟢 PUBLIC Minecraft Server is LIVE with AUTO-BACKUP!"
-          Write-Host "🌍 Connect: $env:PUBLIC_URL"
+          if ($env:PUBLIC_URL -and $env:PUBLIC_URL -ne "Check ngrok dashboard at http://localhost:4040") {
+              Write-Host "🌍 Connect: $env:PUBLIC_URL"
+          } else {
+              Write-Host "🌍 Connect: Check http://localhost:4040 for ngrok URL"
+          }
           Write-Host "💾 Next backup in 30 minutes"
           Write-Host "⚠️  Server will run for up to 6 hours"
           Write-Host ""
@@ -368,14 +445,43 @@ jobs:
               
               Write-Host "💾 Creating $backupType backup: $backupName"
               
-              $worldPath = "C:\MinecraftServer\worlds"
-              if (Test-Path $worldPath) {
+              # Check multiple possible world locations
+              $possibleWorldPaths = @(
+                  "C:\MinecraftServer\worlds",
+                  "C:\MinecraftServer\world",
+                  "C:\MinecraftServer\Bedrock level"
+              )
+              
+              $worldPath = $null
+              foreach ($path in $possibleWorldPaths) {
+                  if (Test-Path $path -and (Get-ChildItem $path -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
+                      $worldPath = $path
+                      break
+                  }
+              }
+              
+              if ($worldPath) {
                   try {
-                      Compress-Archive -Path "$worldPath\*" -DestinationPath $backupPath -Force
-                      Write-Host "✅ Backup created successfully"
-                      return $true
+                      # Create backup with retry logic
+                      $tempBackupDir = "$env:TEMP\minecraft_backup_$timestamp"
+                      New-Item -Path $tempBackupDir -ItemType Directory -Force
+                      
+                      # Use robocopy for file copying
+                      $robocopyResult = robocopy "$worldPath" "$tempBackupDir" /E /R:1 /W:1 /NP /NFL /NDL
+                      
+                      if (Test-Path $tempBackupDir -and (Get-ChildItem $tempBackupDir -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
+                          Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $backupPath -Force
+                          Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+                          Write-Host "✅ Backup created successfully"
+                          return $true
+                      } else {
+                          Write-Host "⚠️ No files to backup"
+                          return $false
+                      }
                   } catch {
                       Write-Host "❌ Backup failed: $($_.Exception.Message)"
+                      # Cleanup temp directory
+                      Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
                       return $false
                   }
               } else {
@@ -411,13 +517,32 @@ jobs:
                   
                   if ($serverRunning -and $ngrokRunning) {
                       $nextBackupIn = 30 - $timeSinceBackup.TotalMinutes
-                      Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | Connect: $env:PUBLIC_URL | Next backup in: $([math]::Round($nextBackupIn)) min"
+                      
+                      if ($env:PUBLIC_URL -and $env:PUBLIC_URL -ne "Check ngrok dashboard at http://localhost:4040") {
+                          Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | Connect: $env:PUBLIC_URL | Next backup in: $([math]::Round($nextBackupIn)) min"
+                      } else {
+                          Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | URL: http://localhost:4040 | Next backup in: $([math]::Round($nextBackupIn)) min"
+                      }
                       
                       # Get connection info if available
                       try {
-                          $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue
-                          $connections = $tunnelInfo.tunnels[0].metrics.conns.count
-                          Write-Host "           📊 Active connections: $connections | Backups created: $backupCounter"
+                          $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue -TimeoutSec 5
+                          if ($tunnelInfo.tunnels -and $tunnelInfo.tunnels.Count -gt 0) {
+                              $connections = $tunnelInfo.tunnels[0].metrics.conns.count
+                              Write-Host "           📊 Active connections: $connections | Backups created: $backupCounter"
+                              
+                              # Update PUBLIC_URL if we got it now
+                              if (-not $env:PUBLIC_URL -or $env:PUBLIC_URL -eq "Check ngrok dashboard at http://localhost:4040") {
+                                  $newUrl = $tunnelInfo.tunnels[0].public_url -replace "udp://", ""
+                                  if ($newUrl) {
+                                      echo "PUBLIC_URL=$newUrl" >> $env:GITHUB_ENV
+                                      $env:PUBLIC_URL = $newUrl
+                                      Write-Host "           🌍 URL discovered: $newUrl"
+                                  }
+                              }
+                          } else {
+                              Write-Host "           📊 Tunnel status: OK | Backups created: $backupCounter"
+                          }
                       } catch {
                           Write-Host "           📊 Tunnel status: OK | Backups created: $backupCounter"
                       }
@@ -449,6 +574,7 @@ jobs:
                   Stop-Process -Id $env:NGROK_PID -Force -ErrorAction SilentlyContinue
               } catch {}
           }
+
       - name: Upload World Backups as Artifacts
         if: always()
         uses: actions/upload-artifact@v4
