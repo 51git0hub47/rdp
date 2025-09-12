@@ -388,7 +388,7 @@ jobs:
 
       - name: Upload World Backups as Artifacts
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: minecraft-world-backups-${{ github.run_id }}
           path: C:\WorldBackups\*.zip
