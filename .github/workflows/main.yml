@@ -77,7 +77,7 @@ jobs:
           Set-Content -Path "$serverDir\eula.txt" -Value "eula=true"
           
           # Configure server
-          $config = @"
+          $config = @'
 server-name=GitHub Public Server
 gamemode=survival
 force-gamemode=false
@@ -95,7 +95,7 @@ max-threads=8
 level-name=Bedrock level
 default-player-permission-level=member
 texturepack-required=false
-"@
+'@
           Set-Content -Path "$serverDir\server.properties" -Value $config
           Write-Host "✅ Minecraft server configured"
 
