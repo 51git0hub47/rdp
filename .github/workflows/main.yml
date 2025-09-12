@@ -64,19 +64,75 @@ jobs:
           $serverDir = "C:\MinecraftServer"
           New-Item -Path $serverDir -ItemType Directory -Force
           
-          # Download Minecraft Bedrock Server
-          $mcUrl = "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.31.04.zip"
-          $zipPath = "$serverDir\bedrock-server.zip"
+          # Try multiple Minecraft server download URLs
+          $mcUrls = @(
+              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.31.04.zip",
+              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.30.03.zip",
+              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.23.01.zip"
+          )
           
-          Write-Host "Downloading Minecraft Bedrock Server..."
-          Invoke-WebRequest -Uri $mcUrl -OutFile $zipPath
-          Expand-Archive -Path $zipPath -DestinationPath $serverDir -Force
-          Remove-Item $zipPath
+          $zipPath = "$serverDir\bedrock-server.zip"
+          $downloaded = $false
+          
+          foreach ($url in $mcUrls) {
+              try {
+                  Write-Host "Attempting to download Minecraft Bedrock Server from: $url"
+                  
+                  # Use different download methods
+                  try {
+                      # Try with TLS 1.2
+                      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                      Invoke-WebRequest -Uri $url -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -TimeoutSec 300
+                      $downloaded = $true
+                      Write-Host "✅ Successfully downloaded from: $url"
+                      break
+                  } catch {
+                      Write-Host "❌ Failed with Invoke-WebRequest: $($_.Exception.Message)"
+                      
+                      # Try with WebClient as fallback
+                      try {
+                          Write-Host "🔄 Trying alternative download method..."
+                          $webClient = New-Object System.Net.WebClient
+                          $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                          $webClient.DownloadFile($url, $zipPath)
+                          $downloaded = $true
+                          Write-Host "✅ Successfully downloaded using WebClient from: $url"
+                          break
+                      } catch {
+                          Write-Host "❌ WebClient also failed: $($_.Exception.Message)"
+                      }
+                  }
+              } catch {
+                  Write-Host "❌ Failed to download from $url : $($_.Exception.Message)"
+                  continue
+              }
+          }
+          
+          if (-not $downloaded) {
+              Write-Error "❌ Failed to download Minecraft server from all sources"
+              Write-Host "🔍 Network connectivity test:"
+              try {
+                  Test-NetConnection -ComputerName "minecraft.azureedge.net" -Port 443
+                  Test-NetConnection -ComputerName "8.8.8.8" -Port 443
+              } catch {
+                  Write-Host "Network test failed: $($_.Exception.Message)"
+              }
+              exit 1
+          }
+          
+          Write-Host "📦 Extracting server files..."
+          try {
+              Expand-Archive -Path $zipPath -DestinationPath $serverDir -Force
+              Remove-Item $zipPath -ErrorAction SilentlyContinue
+          } catch {
+              Write-Error "❌ Failed to extract server files: $($_.Exception.Message)"
+              exit 1
+          }
           
           # Accept EULA
           Set-Content -Path "$serverDir\eula.txt" -Value "eula=true"
           
-          Write-Host "✅ Minecraft server downloaded and EULA accepted"
+          Write-Host "✅ Minecraft server downloaded, extracted, and EULA accepted"
 
       - name: Setup Backup System
         run: |
