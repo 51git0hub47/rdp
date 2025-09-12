@@ -1,113 +1,417 @@
-name: RDP
+name: Public Minecraft Server
 
 on:
   workflow_dispatch:
+    inputs:
+      restore_world:
+        description: 'Restore previous world backup'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+        - 'true'
+        - 'false'
 
 jobs:
-  secure-rdp:
+  public-minecraft:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Configure Core RDP Settings (for management)
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          # Enable RDP for server management
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
-        run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          # Create admin user
+          $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | % {[char]$_})
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          try { Remove-LocalUser -Name "Admin" -ErrorAction SilentlyContinue } catch {}
+          New-LocalUser -Name "Admin" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "Admin"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Admin"
           
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
+          echo "ADMIN_PASSWORD=$password" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale
+      - name: Install Tailscale (for RDP access)
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection
+      - name: Connect to Tailscale
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=mc-public-$env:GITHUB_RUN_ID
           $tsIP = $null
           $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
+          while (-not $tsIP -and $retries -lt 15) {
+              try {
+                  $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+                  if ($tsIP) { $tsIP = $tsIP.Trim() }
+              } catch { Start-Sleep -Seconds 3 }
               $retries++
           }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Verify RDP Accessibility
+
+      - name: Download and Setup Minecraft Server
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          # Create server directory
+          $serverDir = "C:\MinecraftServer"
+          New-Item -Path $serverDir -ItemType Directory -Force
           
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
+          # Download Minecraft Bedrock Server
+          $mcUrl = "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.31.04.zip"
+          $zipPath = "$serverDir\bedrock-server.zip"
+          
+          Write-Host "Downloading Minecraft Bedrock Server..."
+          Invoke-WebRequest -Uri $mcUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $serverDir -Force
+          Remove-Item $zipPath
+          
+          # Accept EULA
+          Set-Content -Path "$serverDir\eula.txt" -Value "eula=true"
+          
+          # Configure server
+          $config = @"
+server-name=GitHub Public Server
+gamemode=survival
+force-gamemode=false
+difficulty=easy
+allow-cheats=false
+max-players=20
+online-mode=false
+allow-list=false
+server-port=19132
+server-portv6=19133
+view-distance=32
+tick-distance=4
+player-idle-timeout=30
+max-threads=8
+level-name=Bedrock level
+default-player-permission-level=member
+texturepack-required=false
+"@
+          Set-Content -Path "$serverDir\server.properties" -Value $config
+          Write-Host "✅ Minecraft server configured"
+
+      - name: Setup Backup System
+        run: |
+          # Create backup directory
+          New-Item -Path "C:\WorldBackups" -ItemType Directory -Force
+          Write-Host "✅ Backup system initialized"
+
+      - name: Restore Previous World (if requested)
+        run: |
+          if ("${{ github.event.inputs.restore_world }}" -eq "true") {
+              Write-Host "🔄 Attempting to restore previous world..."
+              
+              try {
+                  # Get list of artifacts from this repo
+                  $artifactUrl = "https://api.github.com/repos/${{ github.repository }}/actions/artifacts"
+                  $headers = @{ 
+                      Authorization = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+                      Accept = "application/vnd.github+json"
+                  }
+                  
+                  $artifacts = Invoke-RestMethod -Uri $artifactUrl -Headers $headers
+                  $latestBackup = $artifacts.artifacts | Where-Object { 
+                      $_.name -like "minecraft-world-backups-*" -and $_.expired -eq $false 
+                  } | Sort-Object created_at -Descending | Select-Object -First 1
+                  
+                  if ($latestBackup) {
+                      Write-Host "📦 Found backup artifact: $($latestBackup.name)"
+                      Write-Host "📅 Created: $($latestBackup.created_at)"
+                      
+                      # Download the artifact
+                      $downloadUrl = $latestBackup.archive_download_url
+                      $backupZip = "$env:TEMP\world_restore.zip"
+                      
+                      Write-Host "⬇️ Downloading backup..."
+                      Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $backupZip
+                      
+                      # Extract to temporary location first
+                      $tempExtract = "$env:TEMP\extracted_backup"
+                      New-Item -Path $tempExtract -ItemType Directory -Force
+                      Expand-Archive -Path $backupZip -DestinationPath $tempExtract -Force
+                      
+                      # Find the actual world backup files and restore them
+                      $backupFiles = Get-ChildItem -Path $tempExtract -Filter "*.zip" -Recurse
+                      if ($backupFiles.Count -gt 0) {
+                          $latestWorldBackup = $backupFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                          Write-Host "🌍 Restoring world from: $($latestWorldBackup.Name)"
+                          
+                          # Create worlds directory and restore
+                          $worldsDir = "C:\MinecraftServer\worlds"
+                          New-Item -Path $worldsDir -ItemType Directory -Force
+                          Expand-Archive -Path $latestWorldBackup.FullName -DestinationPath $worldsDir -Force
+                          
+                          Write-Host "✅ World successfully restored!"
+                          echo "WORLD_RESTORED=true" >> $env:GITHUB_ENV
+                      } else {
+                          Write-Host "⚠️ No world backup files found in artifact"
+                          echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
+                      }
+                      
+                      # Cleanup
+                      Remove-Item $backupZip -Force -ErrorAction SilentlyContinue
+                      Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+                      
+                  } else {
+                      Write-Host "⚠️ No previous world backup found, starting with fresh world"
+                      echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
+                  }
+              } catch {
+                  Write-Host "❌ Error restoring world: $($_.Exception.Message)"
+                  Write-Host "Starting with fresh world instead"
+                  echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
+              }
+          } else {
+              Write-Host "🆕 Starting with fresh world (restore not requested)"
+              echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
+          }
+
+      - name: Install and Setup ngrok
+        run: |
+          # Download ngrok
+          $ngrokUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+          $ngrokPath = "$env:TEMP\ngrok.zip"
+          
+          Write-Host "Downloading ngrok..."
+          Invoke-WebRequest -Uri $ngrokUrl -OutFile $ngrokPath
+          Expand-Archive -Path $ngrokPath -DestinationPath "C:\ngrok" -Force
+          Remove-Item $ngrokPath
+          
+          # Add ngrok to PATH
+          $env:PATH += ";C:\ngrok"
+          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
+          
+          Write-Host "✅ ngrok installed"
+
+      - name: Start Minecraft Server
+        run: |
+          $serverDir = "C:\MinecraftServer"
+          Write-Host "Starting Minecraft server..."
+          
+          if ($env:WORLD_RESTORED -eq "true") {
+              Write-Host "🔄 Starting server with restored world..."
+          } else {
+              Write-Host "🆕 Starting server with fresh world..."
+          }
+          
+          # Start server in background
+          $serverProcess = Start-Process -FilePath "$serverDir\bedrock_server.exe" -WorkingDirectory $serverDir -PassThru -WindowStyle Hidden
+          echo "SERVER_PID=$($serverProcess.Id)" >> $env:GITHUB_ENV
+          
+          # Wait for server to fully start
+          Start-Sleep -Seconds 15
+          
+          if (Get-Process -Id $serverProcess.Id -ErrorAction SilentlyContinue) {
+              Write-Host "✅ Minecraft server started!"
+          } else {
+              Write-Error "Failed to start Minecraft server"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection
+      - name: Expose Server with ngrok
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          Write-Host "Starting ngrok tunnel..."
           
-          # Keep runner active indefinitely (or until manually cancelled)
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-              Start-Sleep -Seconds 300
+          # Start ngrok in background
+          $ngrokProcess = Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "udp", "19132" -PassThru -WindowStyle Hidden
+          echo "NGROK_PID=$($ngrokProcess.Id)" >> $env:GITHUB_ENV
+          
+          # Wait for ngrok to start
+          Start-Sleep -Seconds 10
+          
+          # Get the public URL from ngrok API
+          try {
+              $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
+              $publicUrl = $ngrokInfo.tunnels[0].public_url
+              $publicUrl = $publicUrl -replace "udp://", ""
+              echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
+              Write-Host "✅ ngrok tunnel established: $publicUrl"
+          } catch {
+              Write-Warning "Could not get ngrok URL from API, will try manual check"
+              echo "PUBLIC_URL=Check ngrok dashboard" >> $env:GITHUB_ENV
           }
+
+      - name: Initial World Backup
+        run: |
+          # Wait for world to be properly generated
+          Write-Host "⏳ Waiting for world generation (60 seconds)..."
+          Start-Sleep -Seconds 60
+          
+          # Create initial backup
+          $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+          $backupName = "initial_backup_$timestamp"
+          $backupPath = "C:\WorldBackups\$backupName.zip"
+          
+          Write-Host "💾 Creating initial world backup..."
+          
+          # Backup world files (server keeps running)
+          $worldPath = "C:\MinecraftServer\worlds"
+          if (Test-Path $worldPath) {
+              try {
+                  Compress-Archive -Path "$worldPath\*" -DestinationPath $backupPath -Force
+                  Write-Host "✅ Initial backup created: $backupName"
+              } catch {
+                  Write-Host "⚠️ Initial backup failed: $($_.Exception.Message)"
+              }
+          } else {
+              Write-Host "⚠️ No world data found yet for initial backup"
+          }
+
+      - name: Display Server Information
+        run: |
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════════════════════════════════"
+          Write-Host "                🎮 PUBLIC MINECRAFT SERVER WITH BACKUPS 🎮          "
+          Write-Host "═══════════════════════════════════════════════════════════════════"
+          Write-Host ""
+          Write-Host "🌍 PUBLIC SERVER ADDRESS: $env:PUBLIC_URL"
+          Write-Host "🎯 Game Mode: Survival"
+          Write-Host "⚔️  Difficulty: Easy"
+          Write-Host "👥 Max Players: 20"
+          Write-Host "🔓 Authentication: OFF (cracked players can join)"
+          if ($env:WORLD_RESTORED -eq "true") {
+              Write-Host "🔄 World Status: RESTORED from previous session"
+          } else {
+              Write-Host "🆕 World Status: FRESH world"
+          }
+          Write-Host ""
+          Write-Host "💾 BACKUP SCHEDULE:"
+          Write-Host "   • Initial: 60 seconds after start"
+          Write-Host "   • Periodic: Every 30 minutes"
+          Write-Host "   • Final: When server stops"
+          Write-Host "   • Emergency: If unexpected shutdown"
+          Write-Host ""
+          Write-Host "📱 How to connect:"
+          Write-Host "1. Open Minecraft Bedrock Edition"
+          Write-Host "2. Go to Play → Servers → Add Server"
+          Write-Host "3. Enter the server address above"
+          Write-Host "4. Connect and enjoy!"
+          Write-Host ""
+          Write-Host "🖥️  RDP Access (for server management):"
+          Write-Host "   Install Tailscale and connect to: $env:TAILSCALE_IP"
+          Write-Host "   Username: Admin"
+          Write-Host "   Password: $env:ADMIN_PASSWORD"
+          Write-Host ""
+          Write-Host "═══════════════════════════════════════════════════════════════════"
+          Write-Host ""
+
+      - name: Monitor Server with Auto-Backup
+        run: |
+          $startTime = Get-Date
+          $lastBackup = Get-Date
+          $counter = 0
+          $backupCounter = 1  # We already did initial backup
+          
+          Write-Host "🟢 PUBLIC Minecraft Server is LIVE with AUTO-BACKUP!"
+          Write-Host "🌍 Connect: $env:PUBLIC_URL"
+          Write-Host "💾 Next backup in 30 minutes"
+          Write-Host "⚠️  Server will run for up to 6 hours"
+          Write-Host ""
+          
+          function Create-WorldBackup {
+              param($backupType = "scheduled")
+              
+              $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+              $backupName = "${backupType}_backup_$timestamp"
+              $backupPath = "C:\WorldBackups\$backupName.zip"
+              
+              Write-Host "💾 Creating $backupType backup: $backupName"
+              
+              $worldPath = "C:\MinecraftServer\worlds"
+              if (Test-Path $worldPath) {
+                  try {
+                      Compress-Archive -Path "$worldPath\*" -DestinationPath $backupPath -Force
+                      Write-Host "✅ Backup created successfully"
+                      return $true
+                  } catch {
+                      Write-Host "❌ Backup failed: $($_.Exception.Message)"
+                      return $false
+                  }
+              } else {
+                  Write-Host "⚠️ No world data found to backup"
+                  return $false
+              }
+          }
+          
+          try {
+              while ($true) {
+                  $counter++
+                  $elapsed = (Get-Date) - $startTime
+                  $elapsedStr = "{0:hh\:mm\:ss}" -f $elapsed
+                  
+                  # Check if 30 minutes passed since last backup
+                  $timeSinceBackup = (Get-Date) - $lastBackup
+                  if ($timeSinceBackup.TotalMinutes -ge 30) {
+                      $backupCounter++
+                      Write-Host ""
+                      Write-Host "⏰ Time for scheduled backup #$backupCounter"
+                      
+                      if (Create-WorldBackup -backupType "scheduled") {
+                          $lastBackup = Get-Date
+                          $nextBackup = $lastBackup.AddMinutes(30)
+                          Write-Host "⏰ Next backup scheduled for: $($nextBackup.ToString('HH:mm:ss'))"
+                      }
+                      Write-Host ""
+                  }
+                  
+                  # Check server status
+                  $serverRunning = Get-Process -Id $env:SERVER_PID -ErrorAction SilentlyContinue
+                  $ngrokRunning = Get-Process -Id $env:NGROK_PID -ErrorAction SilentlyContinue
+                  
+                  if ($serverRunning -and $ngrokRunning) {
+                      $nextBackupIn = 30 - $timeSinceBackup.TotalMinutes
+                      Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | Connect: $env:PUBLIC_URL | Next backup in: $([math]::Round($nextBackupIn)) min"
+                      
+                      # Get connection info if available
+                      try {
+                          $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue
+                          $connections = $tunnelInfo.tunnels[0].metrics.conns.count
+                          Write-Host "           📊 Active connections: $connections | Backups created: $backupCounter"
+                      } catch {
+                          Write-Host "           📊 Tunnel status: OK | Backups created: $backupCounter"
+                      }
+                  } else {
+                      Write-Host ""
+                      Write-Host "❌ Server or tunnel stopped, creating final backup..."
+                      Create-WorldBackup -backupType "final"
+                      exit 1
+                  }
+                  
+                  Start-Sleep -Seconds 180  # Status update every 3 minutes
+              }
+          } catch {
+              Write-Host ""
+              Write-Host "⚠️ Server monitoring interrupted: $_"
+              Write-Host "💾 Creating emergency backup..."
+              Create-WorldBackup -backupType "emergency"
+              throw
+          } finally {
+              Write-Host ""
+              Write-Host "🔴 Public server session ended"
+              Write-Host "📊 Total runtime: $elapsedStr"
+              Write-Host "💾 Total backups created: $backupCounter"
+              Write-Host ""
+              
+              # Cleanup processes
+              try {
+                  Stop-Process -Id $env:SERVER_PID -Force -ErrorAction SilentlyContinue
+                  Stop-Process -Id $env:NGROK_PID -Force -ErrorAction SilentlyContinue
+              } catch {}
+          }
+
+      - name: Upload World Backups as Artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: minecraft-world-backups-${{ github.run_id }}
+          path: C:\WorldBackups\*.zip
+          retention-days: 30
