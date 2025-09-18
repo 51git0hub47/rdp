@@ -28,7 +28,6 @@ on:
         - 'cloudflared'
         - 'ngrok'
         - 'serveo'
-        - 'localtunnel'
 
 jobs:
   public-minecraft:
@@ -257,24 +256,6 @@ jobs:
                   Write-Host "✅ ngrok installed"
               }
               
-              "localtunnel" {
-                  Write-Host "📥 Installing LocalTunnel..."
-                  # Install Node.js first (required for LocalTunnel)
-                  $nodeUrl = "https://nodejs.org/dist/v18.18.2/node-v18.18.2-win-x64.zip"
-                  $nodePath = "$env:TEMP\node.zip"
-                  Invoke-WebRequest -Uri $nodeUrl -OutFile $nodePath
-                  Expand-Archive -Path $nodePath -DestinationPath "C:\nodejs" -Force
-                  Remove-Item $nodePath
-                  
-                  # Add Node.js to PATH
-                  $env:PATH += ";C:\nodejs\node-v18.18.2-win-x64"
-                  [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Process)
-                  
-                  # Install localtunnel via npm
-                  & "C:\nodejs\node-v18.18.2-win-x64\npm.cmd" install -g localtunnel
-                  Write-Host "✅ LocalTunnel installed"
-              }
-              
               "serveo" {
                   Write-Host "📥 Setting up Serveo (SSH-based)..."
                   # Serveo uses SSH, which is built into Windows 10/11
@@ -381,36 +362,6 @@ jobs:
                   
                   echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
                   Write-Host "✅ ngrok tunnel started: $publicUrl"
-              }
-              
-              "localtunnel" {
-                  Write-Host "🚀 Starting LocalTunnel..."
-                  # LocalTunnel works with TCP, we need a UDP-to-TCP proxy
-                  # Start a simple UDP-to-TCP forwarder using PowerShell
-                  $proxyScript = @'
-$udpClient = New-Object System.Net.Sockets.UdpClient(19133)
-$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19134)
-$tcpListener.Start()
-while ($true) {
-    $tcpClient = $tcpListener.AcceptTcpClient()
-    # Simple proxy logic would go here
-    Start-Sleep -Milliseconds 100
-}
-'@
-                  $proxyScript | Out-File -FilePath "C:\udp_tcp_proxy.ps1"
-                  $proxyProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "C:\udp_tcp_proxy.ps1" -PassThru -WindowStyle Hidden
-                  
-                  # Start LocalTunnel
-                  $tunnelProcess = Start-Process -FilePath "C:\nodejs\node-v18.18.2-win-x64\npx.cmd" -ArgumentList "localtunnel", "--port", "19134" -PassThru -WindowStyle Hidden -RedirectStandardOutput "C:\lt_output.log"
-                  echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
-                  echo "PROXY_PID=$($proxyProcess.Id)" >> $env:GITHUB_ENV
-                  echo "TUNNEL_SERVICE=localtunnel" >> $env:GITHUB_ENV
-                  
-                  Start-Sleep -Seconds 15
-                  $publicUrl = "Check LocalTunnel logs at C:\lt_output.log"
-                  
-                  echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
-                  Write-Host "✅ LocalTunnel started: $publicUrl"
               }
               
               "serveo" {
@@ -567,7 +518,6 @@ while ($true) {
           switch ($tunnelService) {
               "cloudflared" { Write-Host "   Check logs: C:\tunnel_output.log" }
               "ngrok" { Write-Host "   Dashboard: http://localhost:4040" }
-              "localtunnel" { Write-Host "   Check logs: C:\lt_output.log" }
               "serveo" { Write-Host "   SSH tunnel active - check process output" }
           }
           Write-Host ""
@@ -684,21 +634,6 @@ while ($true) {
                               } catch {
                                   $status.Details = "ngrok running, API unavailable"
                               }
-                          }
-                      }
-                      
-                      "localtunnel" {
-                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
-                          if ($tunnelProcess) {
-                              $status.Running = $true
-                              try {
-                                  $logContent = Get-Content "C:\lt_output.log" -ErrorAction SilentlyContinue | Select-Object -Last 5
-                                  $urlLine = $logContent | Where-Object { $_ -match "https://.*localtunnel\.me" }
-                                  if ($urlLine) {
-                                      $status.URL = ($urlLine -split " " | Where-Object { $_ -match "https://.*localtunnel\.me" })[0]
-                                  }
-                              } catch {}
-                              $status.Details = "LocalTunnel active"
                           }
                       }
                       
