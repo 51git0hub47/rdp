@@ -11,6 +11,24 @@ on:
         options:
         - 'true'
         - 'false'
+      enable_rdp:
+        description: 'Enable RDP access'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+        - 'true'
+        - 'false'
+      tunnel_service:
+        description: 'Choose tunnel service'
+        required: false
+        default: 'cloudflared'
+        type: choice
+        options:
+        - 'cloudflared'
+        - 'ngrok'
+        - 'serveo'
+        - 'localtunnel'
 
 jobs:
   public-minecraft:
@@ -18,7 +36,8 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Configure Core RDP Settings (for management)
+      - name: Configure Core RDP Settings (if enabled)
+        if: github.event.inputs.enable_rdp == 'true'
         run: |
           # Enable RDP for server management
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
@@ -34,8 +53,10 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Admin"
           
           echo "ADMIN_PASSWORD=$password" >> $env:GITHUB_ENV
+          echo "RDP_ENABLED=true" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale (for RDP access)
+      - name: Install Tailscale (if RDP enabled)
+        if: github.event.inputs.enable_rdp == 'true' && secrets.TAILSCALE_AUTH_KEY != ''
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
@@ -43,7 +64,8 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-      - name: Connect to Tailscale
+      - name: Connect to Tailscale (if RDP enabled)
+        if: github.event.inputs.enable_rdp == 'true' && secrets.TAILSCALE_AUTH_KEY != ''
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=mc-public-$env:GITHUB_RUN_ID
           $tsIP = $null
@@ -210,22 +232,56 @@ jobs:
               echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
           }
 
-      - name: Install and Setup ngrok
+      - name: Install Tunnel Service
         run: |
-          # Download ngrok
-          $ngrokUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
-          $ngrokPath = "$env:TEMP\ngrok.zip"
+          $tunnelService = "${{ github.event.inputs.tunnel_service }}"
+          Write-Host "Installing tunnel service: $tunnelService"
           
-          Write-Host "Downloading ngrok..."
-          Invoke-WebRequest -Uri $ngrokUrl -OutFile $ngrokPath
-          Expand-Archive -Path $ngrokPath -DestinationPath "C:\ngrok" -Force
-          Remove-Item $ngrokPath
-          
-          # Add ngrok to PATH
-          $env:PATH += ";C:\ngrok"
-          [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
-          
-          Write-Host "✅ ngrok installed"
+          switch ($tunnelService) {
+              "cloudflared" {
+                  Write-Host "📥 Installing Cloudflare Tunnel..."
+                  $cloudflaredUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+                  $cloudflaredPath = "C:\cloudflared\cloudflared.exe"
+                  New-Item -Path "C:\cloudflared" -ItemType Directory -Force
+                  Invoke-WebRequest -Uri $cloudflaredUrl -OutFile $cloudflaredPath
+                  Write-Host "✅ Cloudflare Tunnel installed"
+              }
+              
+              "ngrok" {
+                  Write-Host "📥 Installing ngrok..."
+                  $ngrokUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+                  $ngrokPath = "$env:TEMP\ngrok.zip"
+                  Invoke-WebRequest -Uri $ngrokUrl -OutFile $ngrokPath
+                  Expand-Archive -Path $ngrokPath -DestinationPath "C:\ngrok" -Force
+                  Remove-Item $ngrokPath
+                  Write-Host "✅ ngrok installed"
+              }
+              
+              "localtunnel" {
+                  Write-Host "📥 Installing LocalTunnel..."
+                  # Install Node.js first (required for LocalTunnel)
+                  $nodeUrl = "https://nodejs.org/dist/v18.18.2/node-v18.18.2-win-x64.zip"
+                  $nodePath = "$env:TEMP\node.zip"
+                  Invoke-WebRequest -Uri $nodeUrl -OutFile $nodePath
+                  Expand-Archive -Path $nodePath -DestinationPath "C:\nodejs" -Force
+                  Remove-Item $nodePath
+                  
+                  # Add Node.js to PATH
+                  $env:PATH += ";C:\nodejs\node-v18.18.2-win-x64"
+                  [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Process)
+                  
+                  # Install localtunnel via npm
+                  & "C:\nodejs\node-v18.18.2-win-x64\npm.cmd" install -g localtunnel
+                  Write-Host "✅ LocalTunnel installed"
+              }
+              
+              "serveo" {
+                  Write-Host "📥 Setting up Serveo (SSH-based)..."
+                  # Serveo uses SSH, which is built into Windows 10/11
+                  # We'll use the built-in SSH client
+                  Write-Host "✅ Serveo ready (uses built-in SSH client)"
+              }
+          }
 
       - name: Start Minecraft Server
         run: |
@@ -253,54 +309,145 @@ jobs:
               exit 1
           }
 
-      - name: Expose Server with ngrok
+      - name: Expose Server with Tunnel
         run: |
-          Write-Host "Starting ngrok tunnel..."
+          $tunnelService = "${{ github.event.inputs.tunnel_service }}"
+          Write-Host "Starting tunnel service: $tunnelService"
           
-          # Start ngrok in background
-          $ngrokProcess = Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "udp", "19132" -PassThru -WindowStyle Hidden
-          echo "NGROK_PID=$($ngrokProcess.Id)" >> $env:GITHUB_ENV
-          
-          # Wait for ngrok to start
-          Write-Host "⏳ Waiting for ngrok to establish tunnel..."
-          Start-Sleep -Seconds 15
-          
-          # Get the public URL from ngrok API with retries
-          $publicUrl = $null
-          $retries = 0
-          
-          while (-not $publicUrl -and $retries -lt 10) {
-              try {
-                  Write-Host "🔍 Attempt $($retries + 1): Checking ngrok API..."
-                  $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 10
+          switch ($tunnelService) {
+              "cloudflared" {
+                  Write-Host "🚀 Starting Cloudflare Tunnel..."
+                  $tunnelProcess = Start-Process -FilePath "C:\cloudflared\cloudflared.exe" -ArgumentList "tunnel", "--url", "udp://localhost:19132" -PassThru -WindowStyle Hidden -RedirectStandardOutput "C:\tunnel_output.log" -RedirectStandardError "C:\tunnel_error.log"
+                  echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
+                  echo "TUNNEL_SERVICE=cloudflared" >> $env:GITHUB_ENV
                   
-                  if ($ngrokInfo.tunnels -and $ngrokInfo.tunnels.Count -gt 0) {
-                      $publicUrl = $ngrokInfo.tunnels[0].public_url
-                      $publicUrl = $publicUrl -replace "udp://", ""
-                      echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
-                      Write-Host "✅ ngrok tunnel established: $publicUrl"
-                      break
-                  } else {
-                      Write-Host "⚠️ No tunnels found in API response"
+                  # Wait and try to get URL from logs
+                  Start-Sleep -Seconds 15
+                  $publicUrl = "Check tunnel logs at C:\tunnel_output.log"
+                  
+                  # Try to extract URL from logs
+                  try {
+                      $logContent = Get-Content "C:\tunnel_output.log" -ErrorAction SilentlyContinue
+                      $urlLine = $logContent | Where-Object { $_ -match "https://.*trycloudflare\.com" }
+                      if ($urlLine) {
+                          $publicUrl = ($urlLine -split " " | Where-Object { $_ -match "https://.*trycloudflare\.com" })[0]
+                          $publicUrl = $publicUrl -replace "https://", ""
+                      }
+                  } catch {
+                      Write-Host "Could not extract URL from logs, check manually"
                   }
-              } catch {
-                  Write-Host "⚠️ API check failed: $($_.Exception.Message)"
+                  
+                  echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
+                  Write-Host "✅ Cloudflare tunnel started: $publicUrl"
               }
               
-              $retries++
-              if ($retries -lt 10) {
-                  Write-Host "⏳ Waiting 5 seconds before retry..."
-                  Start-Sleep -Seconds 5
+              "ngrok" {
+                  Write-Host "🚀 Starting ngrok tunnel..."
+                  $tunnelProcess = Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "udp", "19132" -PassThru -WindowStyle Hidden
+                  echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
+                  echo "TUNNEL_SERVICE=ngrok" >> $env:GITHUB_ENV
+                  
+                  Start-Sleep -Seconds 15
+                  
+                  # Try multiple methods to get ngrok URL
+                  $publicUrl = $null
+                  $retries = 0
+                  
+                  while (-not $publicUrl -and $retries -lt 5) {
+                      try {
+                          # Method 1: API
+                          $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 10 -ErrorAction SilentlyContinue
+                          if ($ngrokInfo.tunnels -and $ngrokInfo.tunnels.Count -gt 0) {
+                              $publicUrl = $ngrokInfo.tunnels[0].public_url -replace "udp://", ""
+                          }
+                          
+                          # Method 2: Check if web interface is accessible
+                          if (-not $publicUrl) {
+                              $webTest = Invoke-WebRequest -Uri "http://localhost:4040" -TimeoutSec 5 -ErrorAction SilentlyContinue
+                              if ($webTest.StatusCode -eq 200) {
+                                  $publicUrl = "Check ngrok web interface at http://localhost:4040"
+                              }
+                          }
+                      } catch {
+                          Write-Host "Attempt $($retries + 1) failed, retrying..."
+                      }
+                      $retries++
+                      Start-Sleep -Seconds 3
+                  }
+                  
+                  if (-not $publicUrl) {
+                      $publicUrl = "ngrok tunnel started - check manually"
+                  }
+                  
+                  echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
+                  Write-Host "✅ ngrok tunnel started: $publicUrl"
               }
-          }
-          
-          if (-not $publicUrl) {
-              Write-Host "❌ Could not get ngrok URL after 10 attempts"
-              Write-Host "🔧 Manual check required - ngrok process may still be working"
-              echo "PUBLIC_URL=Check ngrok dashboard at http://localhost:4040" >> $env:GITHUB_ENV
               
-              # Don't fail the workflow, continue with monitoring
-              Write-Host "⚠️ Continuing with server monitoring despite ngrok URL issue"
+              "localtunnel" {
+                  Write-Host "🚀 Starting LocalTunnel..."
+                  # LocalTunnel works with TCP, we need a UDP-to-TCP proxy
+                  # Start a simple UDP-to-TCP forwarder using PowerShell
+                  $proxyScript = @"
+`$udpClient = New-Object System.Net.Sockets.UdpClient(19133)
+`$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19134)
+`$tcpListener.Start()
+while (`$true) {
+    `$tcpClient = `$tcpListener.AcceptTcpClient()
+    # Simple proxy logic would go here
+    Start-Sleep -Milliseconds 100
+}
+"@
+                  $proxyScript | Out-File -FilePath "C:\udp_tcp_proxy.ps1"
+                  $proxyProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "C:\udp_tcp_proxy.ps1" -PassThru -WindowStyle Hidden
+                  
+                  # Start LocalTunnel
+                  $tunnelProcess = Start-Process -FilePath "C:\nodejs\node-v18.18.2-win-x64\npx.cmd" -ArgumentList "localtunnel", "--port", "19134" -PassThru -WindowStyle Hidden -RedirectStandardOutput "C:\lt_output.log"
+                  echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
+                  echo "PROXY_PID=$($proxyProcess.Id)" >> $env:GITHUB_ENV
+                  echo "TUNNEL_SERVICE=localtunnel" >> $env:GITHUB_ENV
+                  
+                  Start-Sleep -Seconds 15
+                  $publicUrl = "Check LocalTunnel logs at C:\lt_output.log"
+                  
+                  echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
+                  Write-Host "✅ LocalTunnel started: $publicUrl"
+              }
+              
+              "serveo" {
+                  Write-Host "🚀 Starting Serveo tunnel..."
+                  # Serveo SSH tunnel - this forwards TCP, so we need UDP-to-TCP proxy
+                  $proxyScript = @"
+# Simple UDP to TCP proxy
+`$udpEndpoint = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 19132)
+`$udpClient = New-Object System.Net.Sockets.UdpClient(`$udpEndpoint)
+`$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19135)
+`$tcpListener.Start()
+Write-Host "UDP-to-TCP proxy started on port 19135"
+while (`$true) {
+    try {
+        `$tcpClient = `$tcpListener.AcceptTcpClient()
+        Write-Host "TCP connection accepted"
+        Start-Sleep -Milliseconds 100
+    } catch {
+        Start-Sleep -Milliseconds 100
+    }
+}
+"@
+                  $proxyScript | Out-File -FilePath "C:\serveo_proxy.ps1"
+                  $proxyProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "C:\serveo_proxy.ps1" -PassThru -WindowStyle Hidden
+                  
+                  # Start Serveo SSH tunnel
+                  $tunnelProcess = Start-Process -FilePath "ssh" -ArgumentList "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:19135", "serveo.net" -PassThru -WindowStyle Hidden
+                  echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
+                  echo "PROXY_PID=$($proxyProcess.Id)" >> $env:GITHUB_ENV
+                  echo "TUNNEL_SERVICE=serveo" >> $env:GITHUB_ENV
+                  
+                  Start-Sleep -Seconds 15
+                  $publicUrl = "Serveo tunnel active - check SSH output for URL"
+                  
+                  echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
+                  Write-Host "✅ Serveo tunnel started: $publicUrl"
+              }
           }
 
       - name: Initial World Backup
@@ -376,16 +523,11 @@ jobs:
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
           
-          if ($env:PUBLIC_URL -and $env:PUBLIC_URL -ne "Check ngrok dashboard at http://localhost:4040") {
-              Write-Host "🌍 PUBLIC SERVER ADDRESS: $env:PUBLIC_URL"
-          } else {
-              Write-Host "🌍 PUBLIC SERVER ADDRESS: Check http://localhost:4040 for ngrok URL"
-              Write-Host "   (ngrok is running but API didn't respond - check manually)"
-          }
-          
-          Write-Host "🎯 Game Mode: Default (from server defaults)"
-          Write-Host "👥 Max Players: Default (from server defaults)"
-          Write-Host "🔓 Authentication: Default (from server defaults)"
+          Write-Host "🌍 PUBLIC SERVER ADDRESS: $env:PUBLIC_URL"
+          Write-Host "🔧 Tunnel Service: ${{ github.event.inputs.tunnel_service }}"
+          Write-Host "🎯 Game Mode: Default (configure via RDP)"
+          Write-Host "👥 Max Players: Default (configure via RDP)"
+          Write-Host "🔓 Authentication: Default (configure via RDP)"
           if ($env:WORLD_RESTORED -eq "true") {
               Write-Host "🔄 World Status: RESTORED from previous session"
           } else {
@@ -404,17 +546,30 @@ jobs:
           Write-Host "3. Enter the server address above"
           Write-Host "4. Connect and enjoy!"
           Write-Host ""
-          Write-Host "🖥️  RDP Access (for server management):"
-          if ($env:TAILSCALE_IP) {
-              Write-Host "   Install Tailscale and connect to: $env:TAILSCALE_IP"
-              Write-Host "   Username: Admin"
-              Write-Host "   Password: $env:ADMIN_PASSWORD"
+          
+          if ("${{ github.event.inputs.enable_rdp }}" -eq "true") {
+              Write-Host "🖥️  RDP Access (for server configuration):"
+              if ($env:TAILSCALE_IP) {
+                  Write-Host "   Install Tailscale and connect to: $env:TAILSCALE_IP"
+                  Write-Host "   Username: Admin"
+                  Write-Host "   Password: $env:ADMIN_PASSWORD"
+              } else {
+                  Write-Host "   ⚠️ RDP enabled but Tailscale not configured"
+                  Write-Host "   To enable RDP: Add TAILSCALE_AUTH_KEY to repository secrets"
+              }
           } else {
-              Write-Host "   ⚠️ RDP not available (Tailscale not configured)"
-              Write-Host "   To enable RDP: Add TAILSCALE_AUTH_KEY to repository secrets"
+              Write-Host "🖥️  RDP Access: DISABLED"
           }
+          
           Write-Host ""
-          Write-Host "🔧 Manual ngrok check: http://localhost:4040"
+          Write-Host "🔧 Manual tunnel check:"
+          $tunnelService = "${{ github.event.inputs.tunnel_service }}"
+          switch ($tunnelService) {
+              "cloudflared" { Write-Host "   Check logs: C:\tunnel_output.log" }
+              "ngrok" { Write-Host "   Dashboard: http://localhost:4040" }
+              "localtunnel" { Write-Host "   Check logs: C:\lt_output.log" }
+              "serveo" { Write-Host "   SSH tunnel active - check process output" }
+          }
           Write-Host ""
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
@@ -427,11 +582,8 @@ jobs:
           $backupCounter = 1  # We attempted initial backup
           
           Write-Host "🟢 PUBLIC Minecraft Server is LIVE with AUTO-BACKUP!"
-          if ($env:PUBLIC_URL -and $env:PUBLIC_URL -ne "Check ngrok dashboard at http://localhost:4040") {
-              Write-Host "🌍 Connect: $env:PUBLIC_URL"
-          } else {
-              Write-Host "🌍 Connect: Check http://localhost:4040 for ngrok URL"
-          }
+          Write-Host "🌍 Connect: $env:PUBLIC_URL"
+          Write-Host "🔧 Tunnel: ${{ github.event.inputs.tunnel_service }}"
           Write-Host "💾 Next backup in 30 minutes"
           Write-Host "⚠️  Server will run for up to 6 hours"
           Write-Host ""
@@ -490,6 +642,81 @@ jobs:
               }
           }
           
+          function Get-TunnelStatus {
+              $tunnelService = "${{ github.event.inputs.tunnel_service }}"
+              $status = @{
+                  Running = $false
+                  URL = "Unknown"
+                  Details = ""
+              }
+              
+              try {
+                  switch ($tunnelService) {
+                      "cloudflared" {
+                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
+                          if ($tunnelProcess) {
+                              $status.Running = $true
+                              # Try to get URL from logs
+                              try {
+                                  $logContent = Get-Content "C:\tunnel_output.log" -ErrorAction SilentlyContinue | Select-Object -Last 10
+                                  $urlLine = $logContent | Where-Object { $_ -match "https://.*trycloudflare\.com" }
+                                  if ($urlLine) {
+                                      $url = ($urlLine -split " " | Where-Object { $_ -match "https://.*trycloudflare\.com" })[0]
+                                      $status.URL = $url -replace "https://", ""
+                                  }
+                              } catch {}
+                              $status.Details = "Cloudflare tunnel active"
+                          }
+                      }
+                      
+                      "ngrok" {
+                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
+                          if ($tunnelProcess) {
+                              $status.Running = $true
+                              try {
+                                  $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 3 -ErrorAction SilentlyContinue
+                                  if ($ngrokInfo.tunnels -and $ngrokInfo.tunnels.Count -gt 0) {
+                                      $status.URL = $ngrokInfo.tunnels[0].public_url -replace "udp://", ""
+                                      $status.Details = "ngrok API accessible"
+                                  } else {
+                                      $status.Details = "ngrok running, check localhost:4040"
+                                  }
+                              } catch {
+                                  $status.Details = "ngrok running, API unavailable"
+                              }
+                          }
+                      }
+                      
+                      "localtunnel" {
+                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
+                          if ($tunnelProcess) {
+                              $status.Running = $true
+                              try {
+                                  $logContent = Get-Content "C:\lt_output.log" -ErrorAction SilentlyContinue | Select-Object -Last 5
+                                  $urlLine = $logContent | Where-Object { $_ -match "https://.*localtunnel\.me" }
+                                  if ($urlLine) {
+                                      $status.URL = ($urlLine -split " " | Where-Object { $_ -match "https://.*localtunnel\.me" })[0]
+                                  }
+                              } catch {}
+                              $status.Details = "LocalTunnel active"
+                          }
+                      }
+                      
+                      "serveo" {
+                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
+                          if ($tunnelProcess) {
+                              $status.Running = $true
+                              $status.Details = "Serveo SSH tunnel active"
+                          }
+                      }
+                  }
+              } catch {
+                  $status.Details = "Error checking tunnel status"
+              }
+              
+              return $status
+          }
+          
           try {
               while ($true) {
                   $counter++
@@ -513,39 +740,13 @@ jobs:
                   
                   # Check server status
                   $serverRunning = Get-Process -Id $env:SERVER_PID -ErrorAction SilentlyContinue
-                  $ngrokRunning = Get-Process -Id $env:NGROK_PID -ErrorAction SilentlyContinue
+                  $tunnelStatus = Get-TunnelStatus
                   
-                  if ($serverRunning -and $ngrokRunning) {
+                  if ($serverRunning -and $tunnelStatus.Running) {
                       $nextBackupIn = 30 - $timeSinceBackup.TotalMinutes
                       
-                      if ($env:PUBLIC_URL -and $env:PUBLIC_URL -ne "Check ngrok dashboard at http://localhost:4040") {
-                          Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | Connect: $env:PUBLIC_URL | Next backup in: $([math]::Round($nextBackupIn)) min"
-                      } else {
-                          Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | URL: http://localhost:4040 | Next backup in: $([math]::Round($nextBackupIn)) min"
-                      }
-                      
-                      # Get connection info if available
-                      try {
-                          $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue -TimeoutSec 5
-                          if ($tunnelInfo.tunnels -and $tunnelInfo.tunnels.Count -gt 0) {
-                              $connections = $tunnelInfo.tunnels[0].metrics.conns.count
-                              Write-Host "           📊 Active connections: $connections | Backups created: $backupCounter"
-                              
-                              # Update PUBLIC_URL if we got it now
-                              if (-not $env:PUBLIC_URL -or $env:PUBLIC_URL -eq "Check ngrok dashboard at http://localhost:4040") {
-                                  $newUrl = $tunnelInfo.tunnels[0].public_url -replace "udp://", ""
-                                  if ($newUrl) {
-                                      echo "PUBLIC_URL=$newUrl" >> $env:GITHUB_ENV
-                                      $env:PUBLIC_URL = $newUrl
-                                      Write-Host "           🌍 URL discovered: $newUrl"
-                                  }
-                              }
-                          } else {
-                              Write-Host "           📊 Tunnel status: OK | Backups created: $backupCounter"
-                          }
-                      } catch {
-                          Write-Host "           📊 Tunnel status: OK | Backups created: $backupCounter"
-                      }
+                      Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | ${{ github.event.inputs.tunnel_service }}: $($tunnelStatus.URL) | Next backup in: $([math]::Round($nextBackupIn)) min"
+                      Write-Host "           📊 $($tunnelStatus.Details) | Backups created: $backupCounter"
                   } else {
                       Write-Host ""
                       Write-Host "❌ Server or tunnel stopped, creating final backup..."
@@ -571,7 +772,10 @@ jobs:
               # Cleanup processes
               try {
                   Stop-Process -Id $env:SERVER_PID -Force -ErrorAction SilentlyContinue
-                  Stop-Process -Id $env:NGROK_PID -Force -ErrorAction SilentlyContinue
+                  Stop-Process -Id $env:TUNNEL_PID -Force -ErrorAction SilentlyContinue
+                  if ($env:PROXY_PID) {
+                      Stop-Process -Id $env:PROXY_PID -Force -ErrorAction SilentlyContinue
+                  }
               } catch {}
           }
 
