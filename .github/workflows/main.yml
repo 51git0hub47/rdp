@@ -363,44 +363,7 @@ jobs:
                   echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
                   Write-Host "✅ ngrok tunnel started: $publicUrl"
               }
-              
-              "serveo" {
-                  Write-Host "🚀 Starting Serveo tunnel..."
-                  # Serveo SSH tunnel - this forwards TCP, so we need UDP-to-TCP proxy
-                  $proxyScript = @'
-# Simple UDP to TCP proxy
-$udpEndpoint = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 19132)
-$udpClient = New-Object System.Net.Sockets.UdpClient($udpEndpoint)
-$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19135)
-$tcpListener.Start()
-Write-Host "UDP-to-TCP proxy started on port 19135"
-while ($true) {
-    try {
-        $tcpClient = $tcpListener.AcceptTcpClient()
-        Write-Host "TCP connection accepted"
-        Start-Sleep -Milliseconds 100
-    } catch {
-        Start-Sleep -Milliseconds 100
-    }
-}
-'@
-                  $proxyScript | Out-File -FilePath "C:\serveo_proxy.ps1"
-                  $proxyProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "C:\serveo_proxy.ps1" -PassThru -WindowStyle Hidden
-                  
-                  # Start Serveo SSH tunnel
-                  $tunnelProcess = Start-Process -FilePath "ssh" -ArgumentList "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:19135", "serveo.net" -PassThru -WindowStyle Hidden
-                  echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
-                  echo "PROXY_PID=$($proxyProcess.Id)" >> $env:GITHUB_ENV
-                  echo "TUNNEL_SERVICE=serveo" >> $env:GITHUB_ENV
-                  
-                  Start-Sleep -Seconds 15
-                  $publicUrl = "Serveo tunnel active - check SSH output for URL"
-                  
-                  echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
-                  Write-Host "✅ Serveo tunnel started: $publicUrl"
-              }
-          }
-
+         
       - name: Initial World Backup
         run: |
           # Wait longer for world to be properly generated
