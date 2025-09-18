@@ -27,7 +27,6 @@ on:
         options:
         - 'cloudflared'
         - 'ngrok'
-        - 'serveo'
 
 jobs:
   public-minecraft:
@@ -44,7 +43,7 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           Restart-Service -Name TermService -Force
           # Create admin user
-          $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | % {[char]$_})
+          $password = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | ForEach-Object {[char]$_})
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           try { Remove-LocalUser -Name "Admin" -ErrorAction SilentlyContinue } catch {}
           New-LocalUser -Name "Admin" -Password $securePass -AccountNeverExpires
@@ -55,18 +54,29 @@ jobs:
           echo "RDP_ENABLED=true" >> $env:GITHUB_ENV
 
       - name: Install Tailscale (if RDP enabled)
-        if: github.event.inputs.enable_rdp == 'true' && secrets.TAILSCALE_AUTH_KEY != ''
+        if: github.event.inputs.enable_rdp == 'true' && env.TAILSCALE_AUTH_KEY != ''
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          if ([string]::IsNullOrEmpty($env:TAILSCALE_AUTH_KEY)) {
+            Write-Host "⚠️ TAILSCALE_AUTH_KEY not set in secrets"
+            echo "TAILSCALE_CONFIGURED=false" >> $env:GITHUB_ENV
+            exit 0
+          }
+          
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
+          echo "TAILSCALE_CONFIGURED=true" >> $env:GITHUB_ENV
 
       - name: Connect to Tailscale (if RDP enabled)
-        if: github.event.inputs.enable_rdp == 'true' && secrets.TAILSCALE_AUTH_KEY != ''
+        if: github.event.inputs.enable_rdp == 'true' && env.TAILSCALE_CONFIGURED == 'true'
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=mc-public-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=mc-public-$env:GITHUB_RUN_ID
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 15) {
@@ -84,12 +94,11 @@ jobs:
           $serverDir = "C:\MinecraftServer"
           New-Item -Path $serverDir -ItemType Directory -Force
           
-          # Updated Minecraft server download URLs
+          # Updated Minecraft server download URLs - use official Mojang URLs
           $mcUrls = @(
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.95.1.zip",
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.93.4.zip",
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.92.3.zip",
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.90.2.zip"
+              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.95.1.zip",
+              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.93.4.zip",
+              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.92.3.zip"
           )
           
           $zipPath = "$serverDir\bedrock-server.zip"
@@ -99,45 +108,34 @@ jobs:
               try {
                   Write-Host "Attempting to download Minecraft Bedrock Server from: $url"
                   
-                  # Use different download methods
-                  try {
-                      # Try with TLS 1.2
-                      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                      Invoke-WebRequest -Uri $url -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -TimeoutSec 300
+                  # Set security protocol
+                  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                  
+                  # Try with proper headers
+                  $headers = @{
+                      'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                  }
+                  
+                  Invoke-WebRequest -Uri $url -OutFile $zipPath -Headers $headers -TimeoutSec 300
+                  
+                  # Verify download
+                  if ((Test-Path $zipPath) -and ((Get-Item $zipPath).Length -gt 1MB)) {
                       $downloaded = $true
                       Write-Host "✅ Successfully downloaded from: $url"
                       break
-                  } catch {
-                      Write-Host "❌ Failed with Invoke-WebRequest: $($_.Exception.Message)"
-                      
-                      # Try with WebClient as fallback
-                      try {
-                          Write-Host "🔄 Trying alternative download method..."
-                          $webClient = New-Object System.Net.WebClient
-                          $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                          $webClient.DownloadFile($url, $zipPath)
-                          $downloaded = $true
-                          Write-Host "✅ Successfully downloaded using WebClient from: $url"
-                          break
-                      } catch {
-                          Write-Host "❌ WebClient also failed: $($_.Exception.Message)"
-                      }
+                  } else {
+                      Write-Host "❌ Downloaded file is too small or missing"
+                      Remove-Item $zipPath -ErrorAction SilentlyContinue
                   }
               } catch {
                   Write-Host "❌ Failed to download from $url : $($_.Exception.Message)"
+                  Remove-Item $zipPath -ErrorAction SilentlyContinue
                   continue
               }
           }
           
           if (-not $downloaded) {
               Write-Error "❌ Failed to download Minecraft server from all sources"
-              Write-Host "🔍 Network connectivity test:"
-              try {
-                  Test-NetConnection -ComputerName "minecraft.net" -Port 443
-                  Test-NetConnection -ComputerName "8.8.8.8" -Port 443
-              } catch {
-                  Write-Host "Network test failed: $($_.Exception.Message)"
-              }
               exit 1
           }
           
@@ -147,6 +145,12 @@ jobs:
               Remove-Item $zipPath -ErrorAction SilentlyContinue
           } catch {
               Write-Error "❌ Failed to extract server files: $($_.Exception.Message)"
+              exit 1
+          }
+          
+          # Verify server executable exists
+          if (-not (Test-Path "$serverDir\bedrock_server.exe")) {
+              Write-Error "❌ bedrock_server.exe not found after extraction"
               exit 1
           }
           
@@ -162,72 +166,70 @@ jobs:
           Write-Host "✅ Backup system initialized"
 
       - name: Restore Previous World (if requested)
+        if: github.event.inputs.restore_world == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ("${{ github.event.inputs.restore_world }}" -eq "true") {
-              Write-Host "🔄 Attempting to restore previous world..."
+          Write-Host "🔄 Attempting to restore previous world..."
+          
+          try {
+              # Get list of artifacts from this repo
+              $artifactUrl = "https://api.github.com/repos/${{ github.repository }}/actions/artifacts"
+              $headers = @{ 
+                  Authorization = "Bearer $env:GITHUB_TOKEN"
+                  Accept = "application/vnd.github+json"
+              }
               
-              try {
-                  # Get list of artifacts from this repo
-                  $artifactUrl = "https://api.github.com/repos/${{ github.repository }}/actions/artifacts"
-                  $headers = @{ 
-                      Authorization = "Bearer ${{ secrets.GITHUB_TOKEN }}"
-                      Accept = "application/vnd.github+json"
-                  }
+              $artifacts = Invoke-RestMethod -Uri $artifactUrl -Headers $headers
+              $latestBackup = $artifacts.artifacts | Where-Object { 
+                  $_.name -like "minecraft-world-backups-*" -and $_.expired -eq $false 
+              } | Sort-Object created_at -Descending | Select-Object -First 1
+              
+              if ($latestBackup) {
+                  Write-Host "📦 Found backup artifact: $($latestBackup.name)"
+                  Write-Host "📅 Created: $($latestBackup.created_at)"
                   
-                  $artifacts = Invoke-RestMethod -Uri $artifactUrl -Headers $headers
-                  $latestBackup = $artifacts.artifacts | Where-Object { 
-                      $_.name -like "minecraft-world-backups-*" -and $_.expired -eq $false 
-                  } | Sort-Object created_at -Descending | Select-Object -First 1
+                  # Download the artifact
+                  $downloadUrl = $latestBackup.archive_download_url
+                  $backupZip = "$env:TEMP\world_restore.zip"
                   
-                  if ($latestBackup) {
-                      Write-Host "📦 Found backup artifact: $($latestBackup.name)"
-                      Write-Host "📅 Created: $($latestBackup.created_at)"
+                  Write-Host "⬇️ Downloading backup..."
+                  Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $backupZip
+                  
+                  # Extract to temporary location first
+                  $tempExtract = "$env:TEMP\extracted_backup"
+                  New-Item -Path $tempExtract -ItemType Directory -Force
+                  Expand-Archive -Path $backupZip -DestinationPath $tempExtract -Force
+                  
+                  # Find the actual world backup files and restore them
+                  $backupFiles = Get-ChildItem -Path $tempExtract -Filter "*.zip" -Recurse
+                  if ($backupFiles.Count -gt 0) {
+                      $latestWorldBackup = $backupFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                      Write-Host "🌍 Restoring world from: $($latestWorldBackup.Name)"
                       
-                      # Download the artifact
-                      $downloadUrl = $latestBackup.archive_download_url
-                      $backupZip = "$env:TEMP\world_restore.zip"
+                      # Create worlds directory and restore
+                      $worldsDir = "C:\MinecraftServer\worlds"
+                      New-Item -Path $worldsDir -ItemType Directory -Force
+                      Expand-Archive -Path $latestWorldBackup.FullName -DestinationPath $worldsDir -Force
                       
-                      Write-Host "⬇️ Downloading backup..."
-                      Invoke-WebRequest -Uri $downloadUrl -Headers $headers -OutFile $backupZip
-                      
-                      # Extract to temporary location first
-                      $tempExtract = "$env:TEMP\extracted_backup"
-                      New-Item -Path $tempExtract -ItemType Directory -Force
-                      Expand-Archive -Path $backupZip -DestinationPath $tempExtract -Force
-                      
-                      # Find the actual world backup files and restore them
-                      $backupFiles = Get-ChildItem -Path $tempExtract -Filter "*.zip" -Recurse
-                      if ($backupFiles.Count -gt 0) {
-                          $latestWorldBackup = $backupFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                          Write-Host "🌍 Restoring world from: $($latestWorldBackup.Name)"
-                          
-                          # Create worlds directory and restore
-                          $worldsDir = "C:\MinecraftServer\worlds"
-                          New-Item -Path $worldsDir -ItemType Directory -Force
-                          Expand-Archive -Path $latestWorldBackup.FullName -DestinationPath $worldsDir -Force
-                          
-                          Write-Host "✅ World successfully restored!"
-                          echo "WORLD_RESTORED=true" >> $env:GITHUB_ENV
-                      } else {
-                          Write-Host "⚠️ No world backup files found in artifact"
-                          echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
-                      }
-                      
-                      # Cleanup
-                      Remove-Item $backupZip -Force -ErrorAction SilentlyContinue
-                      Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
-                      
+                      Write-Host "✅ World successfully restored!"
+                      echo "WORLD_RESTORED=true" >> $env:GITHUB_ENV
                   } else {
-                      Write-Host "⚠️ No previous world backup found, starting with fresh world"
+                      Write-Host "⚠️ No world backup files found in artifact"
                       echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
                   }
-              } catch {
-                  Write-Host "❌ Error restoring world: $($_.Exception.Message)"
-                  Write-Host "Starting with fresh world instead"
+                  
+                  # Cleanup
+                  Remove-Item $backupZip -Force -ErrorAction SilentlyContinue
+                  Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+                  
+              } else {
+                  Write-Host "⚠️ No previous world backup found, starting with fresh world"
                   echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
               }
-          } else {
-              Write-Host "🆕 Starting with fresh world (restore not requested)"
+          } catch {
+              Write-Host "❌ Error restoring world: $($_.Exception.Message)"
+              Write-Host "Starting with fresh world instead"
               echo "WORLD_RESTORED=false" >> $env:GITHUB_ENV
           }
 
@@ -251,16 +253,15 @@ jobs:
                   $ngrokUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
                   $ngrokPath = "$env:TEMP\ngrok.zip"
                   Invoke-WebRequest -Uri $ngrokUrl -OutFile $ngrokPath
+                  New-Item -Path "C:\ngrok" -ItemType Directory -Force
                   Expand-Archive -Path $ngrokPath -DestinationPath "C:\ngrok" -Force
                   Remove-Item $ngrokPath
                   Write-Host "✅ ngrok installed"
               }
               
-              "serveo" {
-                  Write-Host "📥 Setting up Serveo (SSH-based)..."
-                  # Serveo uses SSH, which is built into Windows 10/11
-                  # We'll use the built-in SSH client
-                  Write-Host "✅ Serveo ready (uses built-in SSH client)"
+              default {
+                  Write-Error "Unknown tunnel service: $tunnelService"
+                  exit 1
               }
           }
 
@@ -275,18 +276,33 @@ jobs:
               Write-Host "🆕 Starting server with fresh world..."
           }
           
-          # Start server in background
-          $serverProcess = Start-Process -FilePath "$serverDir\bedrock_server.exe" -WorkingDirectory $serverDir -PassThru -WindowStyle Hidden
+          # Configure server properties if needed
+          $serverPropsPath = "$serverDir\server.properties"
+          if (Test-Path $serverPropsPath) {
+              # Ensure server is accessible
+              (Get-Content $serverPropsPath) -replace 'server-port=19132', 'server-port=19132' | Set-Content $serverPropsPath
+              (Get-Content $serverPropsPath) -replace 'online-mode=true', 'online-mode=false' | Set-Content $serverPropsPath
+          }
+          
+          # Start server with proper output redirection
+          $serverProcess = Start-Process -FilePath "$serverDir\bedrock_server.exe" -WorkingDirectory $serverDir -PassThru -NoNewWindow
+          
+          if (-not $serverProcess) {
+              Write-Error "Failed to start Minecraft server process"
+              exit 1
+          }
+          
           echo "SERVER_PID=$($serverProcess.Id)" >> $env:GITHUB_ENV
           
-          # Wait for server to fully start and generate world
-          Write-Host "⏳ Waiting for server startup and world generation..."
-          Start-Sleep -Seconds 30
+          # Wait for server to fully start
+          Write-Host "⏳ Waiting for server startup..."
+          Start-Sleep -Seconds 20
           
+          # Verify server is still running
           if (Get-Process -Id $serverProcess.Id -ErrorAction SilentlyContinue) {
-              Write-Host "✅ Minecraft server started!"
+              Write-Host "✅ Minecraft server started successfully!"
           } else {
-              Write-Error "Failed to start Minecraft server"
+              Write-Error "Minecraft server process has stopped"
               exit 1
           }
 
@@ -298,135 +314,103 @@ jobs:
           switch ($tunnelService) {
               "cloudflared" {
                   Write-Host "🚀 Starting Cloudflare Tunnel..."
-                  $tunnelProcess = Start-Process -FilePath "C:\cloudflared\cloudflared.exe" -ArgumentList "tunnel", "--url", "udp://localhost:19132" -PassThru -WindowStyle Hidden -RedirectStandardOutput "C:\tunnel_output.log" -RedirectStandardError "C:\tunnel_error.log"
+                  
+                  # Start tunnel with proper logging
+                  $tunnelArgs = @(
+                      "tunnel",
+                      "--url", "udp://localhost:19132"
+                  )
+                  
+                  $tunnelProcess = Start-Process -FilePath "C:\cloudflared\cloudflared.exe" -ArgumentList $tunnelArgs -PassThru -NoNewWindow
+                  
+                  if (-not $tunnelProcess) {
+                      Write-Error "Failed to start Cloudflare tunnel"
+                      exit 1
+                  }
+                  
                   echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
                   echo "TUNNEL_SERVICE=cloudflared" >> $env:GITHUB_ENV
                   
-                  # Wait and try to get URL from logs
+                  # Wait for tunnel to establish
+                  Write-Host "⏳ Waiting for tunnel to establish..."
                   Start-Sleep -Seconds 15
-                  $publicUrl = "Check tunnel logs at C:\tunnel_output.log"
                   
-                  # Try to extract URL from logs
-                  try {
-                      $logContent = Get-Content "C:\tunnel_output.log" -ErrorAction SilentlyContinue
-                      $urlLine = $logContent | Where-Object { $_ -match "https://.*trycloudflare\.com" }
-                      if ($urlLine) {
-                          $publicUrl = ($urlLine -split " " | Where-Object { $_ -match "https://.*trycloudflare\.com" })[0]
-                          $publicUrl = $publicUrl -replace "https://", ""
-                      }
-                  } catch {
-                      Write-Host "Could not extract URL from logs, check manually"
-                  }
-                  
+                  $publicUrl = "Cloudflare tunnel active - check process output"
                   echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
-                  Write-Host "✅ Cloudflare tunnel started: $publicUrl"
+                  Write-Host "✅ Cloudflare tunnel started"
               }
               
               "ngrok" {
                   Write-Host "🚀 Starting ngrok tunnel..."
-                  $tunnelProcess = Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "udp", "19132" -PassThru -WindowStyle Hidden
+                  
+                  # Start ngrok tunnel
+                  $tunnelProcess = Start-Process -FilePath "C:\ngrok\ngrok.exe" -ArgumentList "udp", "19132" -PassThru -NoNewWindow
+                  
+                  if (-not $tunnelProcess) {
+                      Write-Error "Failed to start ngrok tunnel"
+                      exit 1
+                  }
+                  
                   echo "TUNNEL_PID=$($tunnelProcess.Id)" >> $env:GITHUB_ENV
                   echo "TUNNEL_SERVICE=ngrok" >> $env:GITHUB_ENV
                   
+                  # Wait for ngrok to start
+                  Write-Host "⏳ Waiting for ngrok to start..."
                   Start-Sleep -Seconds 15
                   
-                  # Try multiple methods to get ngrok URL
-                  $publicUrl = $null
+                  # Try to get ngrok URL
+                  $publicUrl = "ngrok tunnel active - check localhost:4040"
                   $retries = 0
                   
-                  while (-not $publicUrl -and $retries -lt 5) {
+                  while ($retries -lt 5) {
                       try {
-                          # Method 1: API
-                          $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 10 -ErrorAction SilentlyContinue
+                          $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 5
                           if ($ngrokInfo.tunnels -and $ngrokInfo.tunnels.Count -gt 0) {
                               $publicUrl = $ngrokInfo.tunnels[0].public_url -replace "udp://", ""
-                          }
-                          
-                          # Method 2: Check if web interface is accessible
-                          if (-not $publicUrl) {
-                              $webTest = Invoke-WebRequest -Uri "http://localhost:4040" -TimeoutSec 5 -ErrorAction SilentlyContinue
-                              if ($webTest.StatusCode -eq 200) {
-                                  $publicUrl = "Check ngrok web interface at http://localhost:4040"
-                              }
+                              break
                           }
                       } catch {
-                          Write-Host "Attempt $($retries + 1) failed, retrying..."
+                          Write-Host "Attempt $($retries + 1) to get ngrok URL failed, retrying..."
                       }
                       $retries++
                       Start-Sleep -Seconds 3
                   }
                   
-                  if (-not $publicUrl) {
-                      $publicUrl = "ngrok tunnel started - check manually"
-                  }
-                  
                   echo "PUBLIC_URL=$publicUrl" >> $env:GITHUB_ENV
-                  Write-Host "✅ ngrok tunnel started: $publicUrl"
+                  Write-Host "✅ ngrok tunnel started"
               }
-         
+          }
+
       - name: Initial World Backup
         run: |
-          # Wait longer for world to be properly generated
-          Write-Host "⏳ Waiting for world generation and stabilization (2 minutes)..."
-          Start-Sleep -Seconds 120
+          # Wait for world to be properly generated
+          Write-Host "⏳ Waiting for world generation (90 seconds)..."
+          Start-Sleep -Seconds 90
           
-          # Create initial backup using improved method
+          # Create initial backup
           $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
           $backupName = "initial_backup_$timestamp"
           $backupPath = "C:\WorldBackups\$backupName.zip"
           
           Write-Host "💾 Creating initial world backup..."
           
-          # Check multiple possible world locations
-          $possibleWorldPaths = @(
-              "C:\MinecraftServer\worlds",
-              "C:\MinecraftServer\world",
-              "C:\MinecraftServer\Bedrock level"
-          )
+          # Check for world data
+          $worldsPath = "C:\MinecraftServer\worlds"
           
-          $worldPath = $null
-          foreach ($path in $possibleWorldPaths) {
-              if (Test-Path $path) {
-                  $worldPath = $path
-                  Write-Host "📁 Found world data at: $worldPath"
-                  break
-              }
-          }
-          
-          if ($worldPath -and (Get-ChildItem $worldPath -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
-              try {
-                  # Use robocopy for better file handling with retry
-                  $tempBackupDir = "$env:TEMP\minecraft_initial_$timestamp"
-                  New-Item -Path $tempBackupDir -ItemType Directory -Force
-                  
-                  # Copy files with retry logic
-                  $copySuccess = $false
-                  for ($i = 1; $i -le 3; $i++) {
-                      try {
-                          Write-Host "📂 Copy attempt $i of 3..."
-                          robocopy "$worldPath" "$tempBackupDir" /E /R:2 /W:1 /NP
-                          $copySuccess = $true
-                          break
-                      } catch {
-                          Write-Host "⚠️ Copy attempt $i failed: $($_.Exception.Message)"
-                          Start-Sleep -Seconds 5
-                      }
-                  }
-                  
-                  if ($copySuccess -and (Get-ChildItem $tempBackupDir -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
-                      Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $backupPath -Force
-                      Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+          if (Test-Path $worldsPath) {
+              $worldContent = Get-ChildItem $worldsPath -Recurse -ErrorAction SilentlyContinue
+              if ($worldContent.Count -gt 0) {
+                  try {
+                      Compress-Archive -Path "$worldsPath\*" -DestinationPath $backupPath -Force
                       Write-Host "✅ Initial backup created successfully: $backupName"
-                  } else {
-                      Write-Host "⚠️ No files copied, skipping initial backup"
+                  } catch {
+                      Write-Host "⚠️ Initial backup failed: $($_.Exception.Message)"
                   }
-              } catch {
-                  Write-Host "⚠️ Initial backup failed: $($_.Exception.Message)"
-                  # Don't fail the entire workflow for backup issues
-                  Write-Host "🔄 Server will continue running without initial backup"
+              } else {
+                  Write-Host "⚠️ No world data found yet"
               }
           } else {
-              Write-Host "⚠️ No world data found yet, will backup on first scheduled interval"
+              Write-Host "⚠️ Worlds directory not found yet"
           }
 
       - name: Display Server Information
@@ -437,11 +421,16 @@ jobs:
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
           
-          Write-Host "🌍 PUBLIC SERVER ADDRESS: $env:PUBLIC_URL"
+          Write-Host "🌍 PUBLIC SERVER STATUS: RUNNING"
           Write-Host "🔧 Tunnel Service: ${{ github.event.inputs.tunnel_service }}"
-          Write-Host "🎯 Game Mode: Default (configure via RDP)"
-          Write-Host "👥 Max Players: Default (configure via RDP)"
-          Write-Host "🔓 Authentication: Default (configure via RDP)"
+          Write-Host "🎯 Server Port: 19132 (UDP)"
+          
+          if ($env:PUBLIC_URL -ne "Unknown") {
+              Write-Host "📡 Public Address: $env:PUBLIC_URL"
+          } else {
+              Write-Host "📡 Public Address: Check tunnel logs manually"
+          }
+          
           if ($env:WORLD_RESTORED -eq "true") {
               Write-Host "🔄 World Status: RESTORED from previous session"
           } else {
@@ -452,7 +441,6 @@ jobs:
           Write-Host "   • Initial: After world generation"
           Write-Host "   • Periodic: Every 30 minutes"
           Write-Host "   • Final: When server stops"
-          Write-Host "   • Emergency: If unexpected shutdown"
           Write-Host ""
           Write-Host "📱 How to connect:"
           Write-Host "1. Open Minecraft Bedrock Edition"
@@ -464,7 +452,7 @@ jobs:
           if ("${{ github.event.inputs.enable_rdp }}" -eq "true") {
               Write-Host "🖥️  RDP Access (for server configuration):"
               if ($env:TAILSCALE_IP) {
-                  Write-Host "   Install Tailscale and connect to: $env:TAILSCALE_IP"
+                  Write-Host "   Connect to: $env:TAILSCALE_IP"
                   Write-Host "   Username: Admin"
                   Write-Host "   Password: $env:ADMIN_PASSWORD"
               } else {
@@ -476,14 +464,6 @@ jobs:
           }
           
           Write-Host ""
-          Write-Host "🔧 Manual tunnel check:"
-          $tunnelService = "${{ github.event.inputs.tunnel_service }}"
-          switch ($tunnelService) {
-              "cloudflared" { Write-Host "   Check logs: C:\tunnel_output.log" }
-              "ngrok" { Write-Host "   Dashboard: http://localhost:4040" }
-              "serveo" { Write-Host "   SSH tunnel active - check process output" }
-          }
-          Write-Host ""
           Write-Host "═══════════════════════════════════════════════════════════════════"
           Write-Host ""
 
@@ -492,11 +472,10 @@ jobs:
           $startTime = Get-Date
           $lastBackup = Get-Date
           $counter = 0
-          $backupCounter = 1  # We attempted initial backup
+          $backupCounter = 1
           
           Write-Host "🟢 PUBLIC Minecraft Server is LIVE with AUTO-BACKUP!"
-          Write-Host "🌍 Connect: $env:PUBLIC_URL"
-          Write-Host "🔧 Tunnel: ${{ github.event.inputs.tunnel_service }}"
+          Write-Host "🌍 Tunnel: ${{ github.event.inputs.tunnel_service }}"
           Write-Host "💾 Next backup in 30 minutes"
           Write-Host "⚠️  Server will run for up to 6 hours"
           Write-Host ""
@@ -510,109 +489,27 @@ jobs:
               
               Write-Host "💾 Creating $backupType backup: $backupName"
               
-              # Check multiple possible world locations
-              $possibleWorldPaths = @(
-                  "C:\MinecraftServer\worlds",
-                  "C:\MinecraftServer\world",
-                  "C:\MinecraftServer\Bedrock level"
-              )
+              $worldsPath = "C:\MinecraftServer\worlds"
               
-              $worldPath = $null
-              foreach ($path in $possibleWorldPaths) {
-                  if (Test-Path $path -and (Get-ChildItem $path -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
-                      $worldPath = $path
-                      break
-                  }
-              }
-              
-              if ($worldPath) {
-                  try {
-                      # Create backup with retry logic
-                      $tempBackupDir = "$env:TEMP\minecraft_backup_$timestamp"
-                      New-Item -Path $tempBackupDir -ItemType Directory -Force
-                      
-                      # Use robocopy for file copying
-                      $robocopyResult = robocopy "$worldPath" "$tempBackupDir" /E /R:1 /W:1 /NP /NFL /NDL
-                      
-                      if (Test-Path $tempBackupDir -and (Get-ChildItem $tempBackupDir -Recurse -ErrorAction SilentlyContinue).Count -gt 0) {
-                          Compress-Archive -Path "$tempBackupDir\*" -DestinationPath $backupPath -Force
-                          Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+              if (Test-Path $worldsPath) {
+                  $worldContent = Get-ChildItem $worldsPath -Recurse -ErrorAction SilentlyContinue
+                  if ($worldContent.Count -gt 0) {
+                      try {
+                          Compress-Archive -Path "$worldsPath\*" -DestinationPath $backupPath -Force
                           Write-Host "✅ Backup created successfully"
                           return $true
-                      } else {
-                          Write-Host "⚠️ No files to backup"
+                      } catch {
+                          Write-Host "❌ Backup failed: $($_.Exception.Message)"
                           return $false
                       }
-                  } catch {
-                      Write-Host "❌ Backup failed: $($_.Exception.Message)"
-                      # Cleanup temp directory
-                      Remove-Item $tempBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+                  } else {
+                      Write-Host "⚠️ No world data to backup"
                       return $false
                   }
               } else {
-                  Write-Host "⚠️ No world data found to backup"
+                  Write-Host "⚠️ Worlds directory not found"
                   return $false
               }
-          }
-          
-          function Get-TunnelStatus {
-              $tunnelService = "${{ github.event.inputs.tunnel_service }}"
-              $status = @{
-                  Running = $false
-                  URL = "Unknown"
-                  Details = ""
-              }
-              
-              try {
-                  switch ($tunnelService) {
-                      "cloudflared" {
-                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
-                          if ($tunnelProcess) {
-                              $status.Running = $true
-                              # Try to get URL from logs
-                              try {
-                                  $logContent = Get-Content "C:\tunnel_output.log" -ErrorAction SilentlyContinue | Select-Object -Last 10
-                                  $urlLine = $logContent | Where-Object { $_ -match "https://.*trycloudflare\.com" }
-                                  if ($urlLine) {
-                                      $url = ($urlLine -split " " | Where-Object { $_ -match "https://.*trycloudflare\.com" })[0]
-                                      $status.URL = $url -replace "https://", ""
-                                  }
-                              } catch {}
-                              $status.Details = "Cloudflare tunnel active"
-                          }
-                      }
-                      
-                      "ngrok" {
-                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
-                          if ($tunnelProcess) {
-                              $status.Running = $true
-                              try {
-                                  $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 3 -ErrorAction SilentlyContinue
-                                  if ($ngrokInfo.tunnels -and $ngrokInfo.tunnels.Count -gt 0) {
-                                      $status.URL = $ngrokInfo.tunnels[0].public_url -replace "udp://", ""
-                                      $status.Details = "ngrok API accessible"
-                                  } else {
-                                      $status.Details = "ngrok running, check localhost:4040"
-                                  }
-                              } catch {
-                                  $status.Details = "ngrok running, API unavailable"
-                              }
-                          }
-                      }
-                      
-                      "serveo" {
-                          $tunnelProcess = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
-                          if ($tunnelProcess) {
-                              $status.Running = $true
-                              $status.Details = "Serveo SSH tunnel active"
-                          }
-                      }
-                  }
-              } catch {
-                  $status.Details = "Error checking tunnel status"
-              }
-              
-              return $status
           }
           
           try {
@@ -638,25 +535,25 @@ jobs:
                   
                   # Check server status
                   $serverRunning = Get-Process -Id $env:SERVER_PID -ErrorAction SilentlyContinue
-                  $tunnelStatus = Get-TunnelStatus
+                  $tunnelRunning = Get-Process -Id $env:TUNNEL_PID -ErrorAction SilentlyContinue
                   
-                  if ($serverRunning -and $tunnelStatus.Running) {
+                  if ($serverRunning -and $tunnelRunning) {
                       $nextBackupIn = 30 - $timeSinceBackup.TotalMinutes
                       
-                      Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | ${{ github.event.inputs.tunnel_service }}: $($tunnelStatus.URL) | Next backup in: $([math]::Round($nextBackupIn)) min"
-                      Write-Host "           📊 $($tunnelStatus.Details) | Backups created: $backupCounter"
+                      Write-Host "[$elapsedStr] 🎮 SERVER ONLINE | Tunnel: ${{ github.event.inputs.tunnel_service }} | Next backup in: $([math]::Round($nextBackupIn)) min"
+                      Write-Host "           📊 Server PID: $env:SERVER_PID | Tunnel PID: $env:TUNNEL_PID | Backups: $backupCounter"
                   } else {
                       Write-Host ""
                       Write-Host "❌ Server or tunnel stopped, creating final backup..."
                       Create-WorldBackup -backupType "final"
-                      exit 1
+                      break
                   }
                   
                   Start-Sleep -Seconds 180  # Status update every 3 minutes
               }
           } catch {
               Write-Host ""
-              Write-Host "⚠️ Server monitoring interrupted: $_"
+              Write-Host "⚠️ Server monitoring interrupted: $($_.Exception.Message)"
               Write-Host "💾 Creating emergency backup..."
               Create-WorldBackup -backupType "emergency"
               throw
@@ -669,12 +566,11 @@ jobs:
               
               # Cleanup processes
               try {
-                  Stop-Process -Id $env:SERVER_PID -Force -ErrorAction SilentlyContinue
-                  Stop-Process -Id $env:TUNNEL_PID -Force -ErrorAction SilentlyContinue
-                  if ($env:PROXY_PID) {
-                      Stop-Process -Id $env:PROXY_PID -Force -ErrorAction SilentlyContinue
-                  }
-              } catch {}
+                  if ($env:SERVER_PID) { Stop-Process -Id $env:SERVER_PID -Force -ErrorAction SilentlyContinue }
+                  if ($env:TUNNEL_PID) { Stop-Process -Id $env:TUNNEL_PID -Force -ErrorAction SilentlyContinue }
+              } catch {
+                  Write-Host "Note: Some processes may have already stopped"
+              }
           }
 
       - name: Upload World Backups as Artifacts
