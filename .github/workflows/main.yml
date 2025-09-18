@@ -1,59 +1,4 @@
-- name: Download and Setup Minecraft Server
-        run: |
-          # Create server directory
-          $serverDir = "C:\MinecraftServer"
-          New-Item -Path $serverDir -ItemType Directory -Force
-          
-          # Use the original working URLs from your code
-          $mcUrls = @(
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.95.1.zip",
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.93.4.zip",
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.92.3.zip",
-              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.90.2.zip"
-          )
-          
-          $zipPath = "$serverDir\bedrock-server.zip"
-          $downloaded = $false
-          
-          foreach ($url in $mcUrls) {
-              try {
-                  Write-Host "Attempting to download Minecraft Bedrock Server from: $url"
-                  
-                  # Try with TLS 1.2
-                  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                  Invoke-WebRequest -Uri $url -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -TimeoutSec 300
-                  $downloaded = $true
-                  Write-Host "✅ Successfully downloaded from: $url"
-                  break
-              } catch {
-                  Write-Host "❌ Failed with Invoke-WebRequest: $($_.Exception.Message)"
-                  
-                  # Try with WebClient as fallback
-                  try {
-                      Write-Host "🔄 Trying alternative download method..."
-                      $webClient = New-Object System.Net.WebClient
-                      $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                      $webClient.DownloadFile($url, $zipPath)
-                      $downloaded = $true
-                      Write-Host "✅ Successfully downloaded using WebClient from: $url"
-                      break
-                  } catch {
-                      Write-Host "❌ WebClient also failed: $($_.Exception.Message)"
-                  }
-              }
-          }
-          
-          if (-not $downloaded) {
-              Write-Error "❌ Failed to download Minecraft server from all sources"
-              Write-Host "🔍 Network connectivity test:"
-              try {
-                  Test-NetConnection -ComputerName "minecraft.net" -Port 443
-                  Test-NetConnection -ComputerName "8.8.8.8" -Port 443
-              } catch {
-                  Write-Host "Network test failed: $($_.Exception.Message)"
-              }
-              exit 1
-          }name: Public Minecraft Server
+name: Public Minecraft Server
 
 on:
   workflow_dispatch:
@@ -149,157 +94,54 @@ jobs:
           $serverDir = "C:\MinecraftServer"
           New-Item -Path $serverDir -ItemType Directory -Force
           
-          # Multiple fallback methods for getting Minecraft server
-          $downloaded = $false
-          $zipPath = "$serverDir\bedrock-server.zip"
-          
-          # Method 1: Try direct URLs with various sources
+          # Use the original working URLs from your code
           $mcUrls = @(
-              # Official Microsoft URLs
-              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.90.2.zip",
-              "https://minecraft.azureedge.net/bin-win/bedrock-server-1.21.44.01.zip",
-              # Backup URLs from GitHub releases or mirrors
-              "https://github.com/PowerNukkitX/Bedrock-Dedicated-Server/releases/download/1.21.44.01/bedrock-server-1.21.44.01.zip",
-              "https://github.com/PowerNukkitX/Bedrock-Dedicated-Server/releases/download/1.20.81.01/bedrock-server-1.20.81.01.zip"
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.95.1.zip",
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.93.4.zip",
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.92.3.zip",
+              "https://minecraft.net/bedrockdedicatedserver/bin-win/bedrock-server-1.21.90.2.zip"
           )
           
-          Write-Host "🔍 Attempting to download Minecraft Bedrock Server..."
+          $zipPath = "$serverDir\bedrock-server.zip"
+          $downloaded = $false
           
           foreach ($url in $mcUrls) {
               try {
-                  Write-Host "Trying: $url"
+                  Write-Host "Attempting to download Minecraft Bedrock Server from: $url"
                   
-                  # Set security protocol
-                  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12, [Net.SecurityProtocolType]::Tls13
-                  
-                  # Try with multiple methods
-                  $methods = @(
-                      # Method A: Standard Invoke-WebRequest
-                      @{
-                          Method = "Invoke-WebRequest"
-                          Headers = @{
-                              'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                              'Accept' = 'application/octet-stream, */*'
-                          }
-                      },
-                      # Method B: WebClient
-                      @{
-                          Method = "WebClient"
-                          Headers = @{}
-                      },
-                      # Method C: BITS transfer
-                      @{
-                          Method = "BITS"
-                          Headers = @{}
-                      }
-                  )
-                  
-                  foreach ($method in $methods) {
-                      try {
-                          Write-Host "  Using method: $($method.Method)"
-                          
-                          switch ($method.Method) {
-                              "Invoke-WebRequest" {
-                                  Invoke-WebRequest -Uri $url -OutFile $zipPath -Headers $method.Headers -TimeoutSec 180 -MaximumRedirection 5
-                              }
-                              "WebClient" {
-                                  $webClient = New-Object System.Net.WebClient
-                                  $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                                  $webClient.DownloadFile($url, $zipPath)
-                                  $webClient.Dispose()
-                              }
-                              "BITS" {
-                                  Start-BitsTransfer -Source $url -Destination $zipPath -TransferType Download
-                              }
-                          }
-                          
-                          # Verify download
-                          if ((Test-Path $zipPath) -and ((Get-Item $zipPath).Length -gt 5MB)) {
-                              Write-Host "✅ Successfully downloaded with $($method.Method)!"
-                              $downloaded = $true
-                              break
-                          } else {
-                              Write-Host "❌ File too small or missing"
-                              Remove-Item $zipPath -ErrorAction SilentlyContinue
-                          }
-                      } catch {
-                          Write-Host "❌ $($method.Method) failed: $($_.Exception.Message)"
-                          Remove-Item $zipPath -ErrorAction SilentlyContinue
-                      }
-                  }
-                  
-                  if ($downloaded) { break }
-                  
+                  # Try with TLS 1.2
+                  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                  Invoke-WebRequest -Uri $url -OutFile $zipPath -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -TimeoutSec 300
+                  $downloaded = $true
+                  Write-Host "✅ Successfully downloaded from: $url"
+                  break
               } catch {
-                  Write-Host "❌ URL $url failed completely: $($_.Exception.Message)"
-                  continue
-              }
-          }
-          
-          # Method 2: If all else fails, try to build a simple server
-          if (-not $downloaded) {
-              Write-Host "🔧 All download methods failed. Attempting alternative server setup..."
-              
-              # Try downloading Java Edition server as fallback and create a wrapper
-              try {
-                  Write-Host "Trying Java Edition server as fallback..."
-                  $javaServerUrl = "https://piston-data.mojang.com/v1/objects/4707d00eb834b446575d89a61a11b5d548d8c001/server.jar"
-                  $javaServerPath = "$serverDir\server.jar"
+                  Write-Host "❌ Failed with Invoke-WebRequest: $($_.Exception.Message)"
                   
-                  Invoke-WebRequest -Uri $javaServerUrl -OutFile $javaServerPath -TimeoutSec 120
-                  
-                  if ((Test-Path $javaServerPath) -and ((Get-Item $javaServerPath).Length -gt 10MB)) {
-                      Write-Host "📋 Java server downloaded. Creating compatibility setup..."
-                      
-                      # Create a basic bedrock_server.exe wrapper script
-                      $wrapperScript = @"
-@echo off
-echo ========================================
-echo FALLBACK SERVER MODE ACTIVE
-echo Using Java Edition Server
-echo ========================================
-echo.
-echo Server will run on port 25565 (Java Edition)
-echo Connect using Java Edition client
-echo.
-pause
-java -Xmx2G -Xms1G -jar server.jar nogui
-"@
-                      Set-Content -Path "$serverDir\bedrock_server.exe" -Value $wrapperScript
-                      
-                      # Create server properties for Java server
-                      $serverProps = @"
-server-port=25565
-online-mode=false
-white-list=false
-max-players=20
-motd=GitHub Actions Minecraft Server (Java Fallback)
-difficulty=easy
-gamemode=survival
-"@
-                      Set-Content -Path "$serverDir\server.properties" -Value $serverProps
-                      
-                      Write-Host "✅ Fallback Java server setup complete!"
+                  # Try with WebClient as fallback
+                  try {
+                      Write-Host "🔄 Trying alternative download method..."
+                      $webClient = New-Object System.Net.WebClient
+                      $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                      $webClient.DownloadFile($url, $zipPath)
                       $downloaded = $true
+                      Write-Host "✅ Successfully downloaded using WebClient from: $url"
+                      break
+                  } catch {
+                      Write-Host "❌ WebClient also failed: $($_.Exception.Message)"
                   }
-              } catch {
-                  Write-Host "❌ Fallback server setup also failed: $($_.Exception.Message)"
               }
           }
           
           if (-not $downloaded) {
-              Write-Host ""
-              Write-Host "❌❌❌ COMPLETE DOWNLOAD FAILURE ❌❌❌"
-              Write-Host "All download methods failed. This could be due to:"
-              Write-Host "• Minecraft download servers being down"
-              Write-Host "• Network restrictions in GitHub Actions"
-              Write-Host "• Outdated download URLs"
-              Write-Host ""
-              Write-Host "🔧 MANUAL WORKAROUND:"
-              Write-Host "1. Fork this repository"
-              Write-Host "2. Upload bedrock server zip to repository"
-              Write-Host "3. Modify workflow to use uploaded file"
-              Write-Host ""
+              Write-Error "❌ Failed to download Minecraft server from all sources"
+              Write-Host "🔍 Network connectivity test:"
+              try {
+                  Test-NetConnection -ComputerName "minecraft.net" -Port 443
+                  Test-NetConnection -ComputerName "8.8.8.8" -Port 443
+              } catch {
+                  Write-Host "Network test failed: $($_.Exception.Message)"
+              }
               exit 1
           }
           
