@@ -387,16 +387,16 @@ jobs:
                   Write-Host "🚀 Starting LocalTunnel..."
                   # LocalTunnel works with TCP, we need a UDP-to-TCP proxy
                   # Start a simple UDP-to-TCP forwarder using PowerShell
-                  $proxyScript = @"
-`$udpClient = New-Object System.Net.Sockets.UdpClient(19133)
-`$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19134)
-`$tcpListener.Start()
-while (`$true) {
-    `$tcpClient = `$tcpListener.AcceptTcpClient()
+                  $proxyScript = @'
+$udpClient = New-Object System.Net.Sockets.UdpClient(19133)
+$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19134)
+$tcpListener.Start()
+while ($true) {
+    $tcpClient = $tcpListener.AcceptTcpClient()
     # Simple proxy logic would go here
     Start-Sleep -Milliseconds 100
 }
-"@
+'@
                   $proxyScript | Out-File -FilePath "C:\udp_tcp_proxy.ps1"
                   $proxyProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "C:\udp_tcp_proxy.ps1" -PassThru -WindowStyle Hidden
                   
@@ -416,23 +416,23 @@ while (`$true) {
               "serveo" {
                   Write-Host "🚀 Starting Serveo tunnel..."
                   # Serveo SSH tunnel - this forwards TCP, so we need UDP-to-TCP proxy
-                  $proxyScript = @"
+                  $proxyScript = @'
 # Simple UDP to TCP proxy
-`$udpEndpoint = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 19132)
-`$udpClient = New-Object System.Net.Sockets.UdpClient(`$udpEndpoint)
-`$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19135)
-`$tcpListener.Start()
+$udpEndpoint = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 19132)
+$udpClient = New-Object System.Net.Sockets.UdpClient($udpEndpoint)
+$tcpListener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, 19135)
+$tcpListener.Start()
 Write-Host "UDP-to-TCP proxy started on port 19135"
-while (`$true) {
+while ($true) {
     try {
-        `$tcpClient = `$tcpListener.AcceptTcpClient()
+        $tcpClient = $tcpListener.AcceptTcpClient()
         Write-Host "TCP connection accepted"
         Start-Sleep -Milliseconds 100
     } catch {
         Start-Sleep -Milliseconds 100
     }
 }
-"@
+'@
                   $proxyScript | Out-File -FilePath "C:\serveo_proxy.ps1"
                   $proxyProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-File", "C:\serveo_proxy.ps1" -PassThru -WindowStyle Hidden
                   
